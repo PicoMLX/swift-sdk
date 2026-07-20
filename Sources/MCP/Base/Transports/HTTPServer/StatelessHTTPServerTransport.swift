@@ -222,7 +222,25 @@ public actor StatelessHTTPServerTransport:
 
         // Handle by message type
         switch messageKind {
-        case .notification, .response:
+        case .notification(let method):
+            // A cancellation names a wire id; the Server tracks requests by
+            // exchange id (see `routingRequest`). Resolve and rewrite it *before*
+            // yielding, then complete the exchange *after*: completion tears down
+            // the wire-id → exchange mapping, so resolving afterwards would leave
+            // the Server unable to find the task to cancel.
+            var outgoing = body
+            var cancelled: CancelledExchange?
+            if method == CancelledNotification.name {
+                (outgoing, cancelled) = routingCancellation(body)
+            }
+            // Yield to server and return 202 Accepted
+            incomingContinuation.yield(outgoing)
+            if let cancelled {
+                completeExchange(cancelled)
+            }
+            return .accepted()
+
+        case .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted()
@@ -347,6 +365,105 @@ public actor StatelessHTTPServerTransport:
             exchangeIDsByRequestID.removeValue(forKey: requestID)
         } else {
             exchangeIDsByRequestID[requestID] = exchangeIDs
+        }
+    }
+
+    // MARK: - Cancellation
+
+    /// JSON-RPC error code for the synthesized "Request cancelled" response.
+    ///
+    /// MCP defines no cancellation error code; its schema designates [-32000, -32099] as
+    /// "Implementation-specific JSON-RPC error codes". This SDK already uses -32000
+    /// (connection closed) and -32001 (transport error), so -32002 is the next available.
+    private static let requestCancelledErrorCode = -32002
+
+    /// A cancellation's resolved target: the exchange to complete and the
+    /// client's stated reason, if any.
+    private struct CancelledExchange {
+        let exchangeID: String
+        let reason: String?
+    }
+
+    /// Resolves a `notifications/cancelled` body to the exchange it targets and
+    /// rewrites its `params.requestId` from the client's wire id to that
+    /// exchange id — the same treatment `routingRequest` gives request ids — so
+    /// the Server can find the pending task regardless of transport state.
+    ///
+    /// Returns the body unchanged with no target when the wire id resolves to no
+    /// exchange (unknown or already completed — ignored per spec, "Invalid
+    /// cancellation notifications SHOULD be ignored") or to more than one (ids
+    /// are per-client and may legally collide; an ambiguous target fails closed:
+    /// nothing is completed here, and the Server, finding no task under the
+    /// unrouted wire id, cancels nothing).
+    private func routingCancellation(_ body: Data) -> (Data, CancelledExchange?) {
+        guard
+            let notification = try? JSONDecoder().decode(
+                Message<CancelledNotification>.self, from: body),
+            let requestID = notification.params.requestId,
+            case .string(let exchangeID)? = routedRequestID(for: requestID),
+            var json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            var params = json["params"] as? [String: Any]
+        else {
+            return (body, nil)
+        }
+        params["requestId"] = exchangeID
+        json["params"] = params
+        guard
+            let routedBody = try? JSONSerialization.data(
+                withJSONObject: json, options: [.sortedKeys, .withoutEscapingSlashes])
+        else {
+            return (body, nil)
+        }
+        return (routedBody, CancelledExchange(exchangeID: exchangeID, reason: notification.params.reason))
+    }
+
+    /// Completes the HTTP exchange for an in-flight request targeted by a
+    /// `notifications/cancelled` notification.
+    ///
+    /// Per the MCP cancellation spec, the server sends no JSON-RPC response for a
+    /// cancelled request (``Server`` suppresses it). But the Streamable HTTP transport
+    /// requires that a POST carrying a JSON-RPC request receive a response: "the server
+    /// MUST either return `Content-Type: text/event-stream` … or `Content-Type:
+    /// application/json`, to return one JSON object". Without this method, nothing
+    /// resumes the request's response waiter and the POST hangs until transport
+    /// termination.
+    ///
+    /// To satisfy that MUST, the waiter is resumed with a synthesized JSON-RPC error
+    /// response carrying the client's own id. Deviating from the cancellation SHOULD
+    /// ("Not send a response for the cancelled request") is anticipated by the same
+    /// spec: "The sender of the cancellation notification SHOULD ignore any response
+    /// to the request that arrives afterward."
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#sending-messages-to-the-server
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
+    private func completeExchange(_ cancelled: CancelledExchange) {
+        guard let waiter = responseWaiters.removeValue(forKey: cancelled.exchangeID) else {
+            // Completed between resolution and now — nothing left to answer.
+            return
+        }
+
+        var message = "Request cancelled"
+        if let reason = cancelled.reason {
+            message += ": \(reason)"
+        }
+        let response = AnyMethod.response(
+            id: waiter.originalID,
+            error: .serverError(code: Self.requestCancelledErrorCode, message: message)
+        )
+
+        do {
+            // Match the wire format Server uses for outgoing messages.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            waiter.continuation.resume(returning: try encoder.encode(response))
+            logger.debug(
+                "Completed HTTP exchange for cancelled request",
+                metadata: ["requestID": "\(waiter.originalID)", "exchangeID": "\(cancelled.exchangeID)"]
+            )
+        } catch {
+            waiter.continuation.resume(
+                throwing: MCPError.internalError(
+                    "Failed to encode cancellation response: \(error)"))
         }
     }
 
