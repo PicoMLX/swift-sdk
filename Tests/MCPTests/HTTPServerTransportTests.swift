@@ -104,6 +104,18 @@ private func makeStatelessPOSTRequest(body: Data) -> HTTPRequest {
     )
 }
 
+private func makeStatelessPOSTRequest(body: Data, authorization: String) -> HTTPRequest {
+    HTTPRequest(
+        method: "POST",
+        headers: [
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": authorization,
+        ],
+        body: body
+    )
+}
+
 private func makeStatefulTransport(
     sessionIDGenerator: any SessionIDGenerator = UUIDSessionIDGenerator()
 ) -> StatefulHTTPServerTransport {
@@ -146,6 +158,43 @@ private actor ChunkCollector {
     var chunks: [Data] = []
     func append(_ data: Data) { chunks.append(data) }
     func getChunks() -> [Data] { chunks }
+}
+
+/// Guards a one-shot resume so two racing tasks can't double-resume a continuation.
+private actor OnceGuard {
+    private var fired = false
+    func tryFire() -> Bool {
+        guard !fired else { return false }
+        fired = true
+        return true
+    }
+}
+
+/// Races `operation` against `timeout` without blocking on `operation` if it never
+/// completes. Returns `operation`'s result if it finishes first, or `nil` if the
+/// timeout elapses first — turning an indefinite hang into a bounded, observable
+/// test outcome. If `operation` really does hang, its task is simply abandoned
+/// (not cancelled: a suspended `CheckedContinuation`-based wait doesn't observe
+/// cancellation), which is fine for a short-lived test process.
+private func raceAgainstTimeout<T: Sendable>(
+    _ timeout: Duration,
+    operation: @escaping @Sendable () async -> T
+) async -> T? {
+    let guardActor = OnceGuard()
+    return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+        Task {
+            let value = await operation()
+            if await guardActor.tryFire() {
+                continuation.resume(returning: value)
+            }
+        }
+        Task {
+            try? await Task.sleep(for: timeout)
+            if await guardActor.tryFire() {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
 }
 
 private func drainSSEStream(
@@ -1558,5 +1607,329 @@ struct ServerHandlerContextTests {
 
         await server.stop()
         await transport.disconnect()
+    }
+}
+
+// MARK: - StatelessHTTPServerTransport ID Collision Regression Tests (#254, #265)
+//
+// Two concurrent clients may legally reuse a JSON-RPC id: ids are scoped per
+// requester, and in stateless mode there is no session to coordinate them. Before
+// the fix the transport keyed its waiter and HTTP-context maps — and the Server its
+// task map — by the raw wire id, so the second exchange displaced the first: a
+// hang plus a leaked continuation (#254), a handler observing the other client's
+// Authorization header (#265), and one client's cancellation reaching the other
+// client's task. These tests drive both exchanges through a real Server and assert
+// on what each client and each handler observes; responses are never injected by
+// wire id, because after the fix the wire id is not how the transport routes.
+//
+// Ordering is enforced rather than raced: both POSTs are issued *before*
+// `server.start()`, and the test waits — bounded, observing the transport's own
+// wire-id lookup — until each exchange is registered before issuing the next
+// step (see `registerCollidingExchanges`). The incoming stream buffers the
+// yields, so by the time the Server dispatches the first request — and captures
+// its HTTP context, which it does before invoking the handler — the second
+// exchange is provably registered. On the pre-fix transport that is exactly the
+// overwrite. Handlers then meet at a barrier before either is
+// released, every wait on an HTTP exchange is bounded, and cleanup runs even
+// when an assertion fails. Each test fails on the pre-fix transport: the first
+// exchange's response never arrives (bounded → nil), the first handler sees the
+// second client's header, and the cancellation reaches the wrong task.
+
+/// Two-phase rendezvous: handlers `arrive()` and then `awaitRelease()`; the test
+/// `waitForArrivals(_:)` before acting and `release()`s afterwards. `awaitRelease`
+/// observes task cancellation so a cancelled handler can report it.
+private actor HandlerBarrier {
+    private var arrivals = 0
+    private var arrivalWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var released = false
+    private var releaseWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+
+    func arrive() {
+        arrivals += 1
+        let ready = arrivalWaiters.filter { $0.count <= arrivals }
+        arrivalWaiters.removeAll { $0.count <= arrivals }
+        for waiter in ready { waiter.continuation.resume() }
+    }
+
+    func waitForArrivals(_ count: Int) async {
+        if arrivals >= count { return }
+        await withCheckedContinuation { continuation in
+            arrivalWaiters.append((count, continuation))
+        }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters.values { waiter.resume() }
+    }
+
+    /// Throws `CancellationError` if the calling task is cancelled before,
+    /// during, or — because the cancellation callback is asynchronous and can
+    /// race `release()` — immediately after the wait, so a cancelled handler
+    /// can never return a success the test would read as "not cancelled".
+    func awaitRelease() async throws {
+        try Task.checkCancellation()
+        if !released {
+            let token = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                    if released {
+                        continuation.resume()
+                    } else if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        releaseWaiters[token] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(token) }
+            }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func cancelWaiter(_ token: UUID) {
+        releaseWaiters.removeValue(forKey: token)?.resume(throwing: CancellationError())
+    }
+}
+
+/// What each handler observed, keyed by the tool name the request asked for.
+private actor HandlerObservations {
+    struct Entry: Sendable {
+        var authorization: String?
+        var wasCancelled = false
+    }
+    private var entries: [String: Entry] = [:]
+    func recordAuthorization(_ authorization: String?, for name: String) {
+        entries[name, default: Entry()].authorization = authorization
+    }
+    func recordCancelled(for name: String) {
+        entries[name, default: Entry()].wasCancelled = true
+    }
+    func entry(for name: String) -> Entry? { entries[name] }
+}
+
+/// A `tools/call` for `name` carrying `id` (any JSON id type).
+private func makeCallToolBody(id: Any, name: String) -> Data {
+    try! JSONSerialization.data(withJSONObject: [
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": ["name": name] as [String: Any],
+    ])
+}
+
+/// The text of the first content block in a `tools/call` result body.
+private func firstResultText(in body: Data?) -> String? {
+    guard let body,
+        let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+        let result = json["result"] as? [String: Any],
+        let content = result["content"] as? [[String: Any]]
+    else { return nil }
+    return content.first?["text"] as? String
+}
+
+/// Polls `condition` every 5 ms until it holds or `timeout` elapses.
+private func waitUntil(
+    _ timeout: Duration = .seconds(2),
+    _ condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    return await condition()
+}
+
+/// Issues client A's and client B's POSTs — both carrying `wireID` — one at a
+/// time, and does not return until the transport has registered both. The
+/// observation is the transport's own wire-id lookup: after A registers it
+/// shows A's Authorization; once B registers it stops showing A's. On the
+/// pre-fix transport that is the overwrite itself; on the fixed transport the
+/// raw-id alias resolves to the most recently registered exchange for that wire
+/// id, so it shows B's — either way, B is registered. (The fixed transport's
+/// *routing* lookup, `routedRequestID(for:)`, is what turns nil when ambiguous.)
+/// Only then may the Server be started, so the second exchange is provably
+/// registered before the first is dispatched.
+private func registerCollidingExchanges(
+    on transport: StatelessHTTPServerTransport,
+    wireID: Any,
+    lookupID: ID
+) async throws -> (a: Task<HTTPResponse, Never>, b: Task<HTTPResponse, Never>) {
+    // Bodies are built here: `wireID` is `Any`, which cannot cross into a task.
+    let requestA = makeStatelessPOSTRequest(
+        body: makeCallToolBody(id: wireID, name: "A"), authorization: "Bearer client-A")
+    let requestB = makeStatelessPOSTRequest(
+        body: makeCallToolBody(id: wireID, name: "B"), authorization: "Bearer client-B")
+
+    let handleA = Task { await transport.handleRequest(requestA) }
+    let aRegistered = await waitUntil {
+        await transport.httpRequestContext(for: lookupID)?.header("Authorization") == "Bearer client-A"
+    }
+    try #require(aRegistered, "client A's exchange was not registered in time")
+
+    let handleB = Task { await transport.handleRequest(requestB) }
+    let bRegistered = await waitUntil {
+        await transport.httpRequestContext(for: lookupID)?.header("Authorization") != "Bearer client-A"
+    }
+    try #require(bRegistered, "client B's exchange was not registered in time")
+    return (handleA, handleB)
+}
+
+private func jsonID(in body: Data?) -> Any? {
+    guard let body, let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        return nil
+    }
+    return json["id"]
+}
+
+@Suite("StatelessHTTPServerTransport ID Collision Regression Tests")
+struct StatelessHTTPServerTransportIDCollisionRegressionTests {
+
+    /// A Server whose `tools/call` handler records the HTTP context the Server
+    /// captured for it, waits at the barrier, and answers with a result naming
+    /// the tool it served.
+    private func makeServer(
+        barrier: HandlerBarrier,
+        observations: HandlerObservations
+    ) async -> Server {
+        let server = Server(name: "TestServer", version: "1.0")
+        await server.withMethodHandler(CallTool.self) { params in
+            await barrier.arrive()
+            await observations.recordAuthorization(
+                Server.currentHandlerContext?.httpContext?.header("Authorization"),
+                for: params.name)
+            do {
+                try await barrier.awaitRelease()
+            } catch is CancellationError {
+                await observations.recordCancelled(for: params.name)
+                throw CancellationError()
+            }
+            return CallTool.Result(content: [
+                .text(text: "served-\(params.name)", annotations: nil, _meta: nil)
+            ])
+        }
+        return server
+    }
+
+    @Test("Concurrent requests sharing a JSON-RPC id each receive their own response with their own id (#254)")
+    func testCollidingIDsEachGetOwnResponse() async throws {
+        let transport = makeStatelessTransport()
+        let barrier = HandlerBarrier()
+        let observations = HandlerObservations()
+        let server = await makeServer(barrier: barrier, observations: observations)
+        defer {
+            Task {
+                await barrier.release()
+                await transport.disconnect()
+                await server.stop()
+            }
+        }
+
+        // Both clients chose id 7 — legal, since ids are per-requester. Both are
+        // registered before the server starts (see the suite comment).
+        let (handleA, handleB) = try await registerCollidingExchanges(
+            on: transport, wireID: 7, lookupID: .number(7))
+        try await server.start(transport: transport)
+        let bothArrived = await raceAgainstTimeout(.seconds(2)) { await barrier.waitForArrivals(2); return true }
+        try #require(bothArrived != nil, "both handlers should be running before either is released")
+        await barrier.release()
+
+        let responseA = try #require(
+            await raceAgainstTimeout(.seconds(2)) { await handleA.value },
+            "client A's exchange never completed — its waiter was displaced by client B's")
+        let responseB = try #require(
+            await raceAgainstTimeout(.seconds(2)) { await handleB.value },
+            "client B's exchange never completed")
+
+        #expect(responseA.statusCode == 200)
+        #expect(responseB.statusCode == 200)
+        #expect(firstResultText(in: responseA.bodyData) == "served-A")
+        #expect(firstResultText(in: responseB.bodyData) == "served-B")
+        // The wire id comes back as the client sent it: an integer, not a string.
+        #expect(jsonID(in: responseA.bodyData) as? Int == 7)
+        #expect(jsonID(in: responseB.bodyData) as? Int == 7)
+    }
+
+    @Test("Concurrent requests sharing a JSON-RPC id each see their own HTTP context (#265)")
+    func testCollidingIDsKeepTheirOwnHTTPContext() async throws {
+        let transport = makeStatelessTransport()
+        let barrier = HandlerBarrier()
+        let observations = HandlerObservations()
+        let server = await makeServer(barrier: barrier, observations: observations)
+        defer {
+            Task {
+                await barrier.release()
+                await transport.disconnect()
+                await server.stop()
+            }
+        }
+
+        let (handleA, handleB) = try await registerCollidingExchanges(
+            on: transport, wireID: "7", lookupID: .string("7"))
+        try await server.start(transport: transport)
+        let bothArrived = await raceAgainstTimeout(.seconds(2)) { await barrier.waitForArrivals(2); return true }
+        try #require(bothArrived != nil)
+        await barrier.release()
+        _ = await raceAgainstTimeout(.seconds(2)) { await handleA.value }
+        _ = await raceAgainstTimeout(.seconds(2)) { await handleB.value }
+
+        // The Server captured each handler's context at dispatch, after both
+        // exchanges were registered, so a context map keyed only by the wire id
+        // would have handed A client B's header.
+        #expect(await observations.entry(for: "A")?.authorization == "Bearer client-A")
+        #expect(await observations.entry(for: "B")?.authorization == "Bearer client-B")
+    }
+
+    @Test("A cancellation naming a shared JSON-RPC id cancels neither client's request")
+    func testAmbiguousCancellationCancelsNeither() async throws {
+        let transport = makeStatelessTransport()
+        let barrier = HandlerBarrier()
+        let observations = HandlerObservations()
+        let server = await makeServer(barrier: barrier, observations: observations)
+        defer {
+            Task {
+                await barrier.release()
+                await transport.disconnect()
+                await server.stop()
+            }
+        }
+
+        let (handleA, handleB) = try await registerCollidingExchanges(
+            on: transport, wireID: "dup", lookupID: .string("dup"))
+        try await server.start(transport: transport)
+        // Registered *after* `start()`, which appends the Server's built-in
+        // cancellation handler; handlers run in registration order, so this
+        // signal means "the server has processed the notification".
+        let (cancelProcessed, cancelProcessedContinuation) = AsyncStream<Void>.makeStream()
+        _ = await server.onNotification(CancelledNotification.self) { _ in
+            cancelProcessedContinuation.yield(())
+        }
+        let bothArrived = await raceAgainstTimeout(.seconds(2)) { await barrier.waitForArrivals(2); return true }
+        try #require(bothArrived != nil)
+
+        // Client A cancels "dup". With two live exchanges sharing that wire id the
+        // target is ambiguous; the safe outcome is to cancel neither (cancellation
+        // is advisory), never to cancel client B's work.
+        let cancelResponse = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestID: "dup")))
+        #expect(cancelResponse.statusCode == 202)
+        _ = try #require(await nextValue(from: cancelProcessed, timeout: .seconds(2)),
+            "the server never processed the cancellation notification")
+        await barrier.release()
+
+        let responseA = try #require(
+            await raceAgainstTimeout(.seconds(2)) { await handleA.value },
+            "client A's request did not complete")
+        let responseB = try #require(
+            await raceAgainstTimeout(.seconds(2)) { await handleB.value },
+            "client B's request did not complete — it was cancelled by client A's notification")
+        #expect(firstResultText(in: responseA.bodyData) == "served-A")
+        #expect(firstResultText(in: responseB.bodyData) == "served-B")
+        #expect(await observations.entry(for: "A")?.wasCancelled == false)
+        #expect(await observations.entry(for: "B")?.wasCancelled == false)
     }
 }
