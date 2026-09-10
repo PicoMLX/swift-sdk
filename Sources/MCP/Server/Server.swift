@@ -999,10 +999,16 @@ public actor Server {
                 return
             }
 
-            // Cancel the pending request task if it exists and remove from tracking
-            if let pendingRequestID = await self.routedRequestID(for: requestId),
-                let task = await self.removePendingRequest(id: pendingRequestID)
-            {
+            // Cancel the pending request task if it exists and remove from tracking.
+            // A routing transport maps a client's wire id to the id this server saw;
+            // it has no mapping for an id the transport already routed (a stateless
+            // HTTP transport rewrites a cancellation's requestId to the exchange id
+            // before forwarding it), so fall back to the id as given — the key the
+            // pending task was registered under. An ambiguous wire id maps to nil and
+            // matches no task either way, so an ambiguous cancellation still cancels
+            // nothing.
+            let pendingRequestID = await self.routedRequestID(for: requestId) ?? requestId
+            if let task = await self.removePendingRequest(id: pendingRequestID) {
                 task.cancel()
                 await self.logger?.debug(
                     "Cancelled request",
