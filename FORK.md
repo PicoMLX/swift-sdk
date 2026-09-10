@@ -47,12 +47,16 @@ Not included, and why:
 Same package name, same `MCP` product and module, so switching is a URL
 change and switching back is the same change reversed.
 
-Pin an exact fork tag. Fork tags use SemVer prerelease form on top of the
-upstream version they extend — `0.12.1-ianegordon.N` — so they can never be
-mistaken for an upstream release:
+Pin an exact fork tag. Fork tags use SemVer prerelease form naming the
+*next* upstream patch version — `0.12.2-ianegordon.N` while the base is
+`0.12.1` — because a prerelease identifier denotes a version that precedes
+the one it names, and this content is "0.12.1 plus fixes on the way to
+0.12.2". The identifier makes a fork tag impossible to mistake for an
+upstream release, and it sorts correctly before a real `0.12.2` if upstream
+ships one. `N` increments per fork tag on the same base:
 
 ```swift
-.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.1-ianegordon.1")
+.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.1")
 ```
 
 Two Swift Package Manager facts to know:
@@ -141,6 +145,6 @@ Until this is scripted, the steps are manual and this file is the record.
    SHA matches the manifest (record a change if the author pushed), and
    merge `pr/<n>` or its `-on-<base>` adaptation into `integration`.
 3. `swift test` on `integration`; nothing is tagged on a red suite.
-4. Tag `0.<upstream>-ianegordon.<N>` on `integration` with the manifest in
-   the tag message.
+4. Tag `<next upstream patch>-ianegordon.<N>` on `integration` as an
+   annotated tag with the manifest in the tag message.
 5. Update this file's manifest table.
