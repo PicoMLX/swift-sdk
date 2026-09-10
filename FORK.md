@@ -26,13 +26,13 @@ merged in the listed order. This table is the manifest: a PR is on
 
 | Order | Upstream PR | Fixes | Author | Head SHA merged | Status on `integration` | Notes |
 | ----- | ----------- | ----- | ------ | --------------- | ----------------------- | ----- |
-| _(none yet — first merges pending)_ | | | | | | |
+| 1 | [#264](https://github.com/modelcontextprotocol/swift-sdk/pull/264) | [#254](https://github.com/modelcontextprotocol/swift-sdk/issues/254), [#265](https://github.com/modelcontextprotocol/swift-sdk/issues/265) | jstar0 | `e14ef60` (branch `pr/264`) | merged | Stateless transport keys exchanges by a private id, so concurrent clients reusing a JSON-RPC id no longer displace each other's response waiter or HTTP context. |
+| 1a | — (fork addition, offered upstream with #264) | verification of #254, #265 | ianegordon | `53bf923` (branch `pr/264-tests`, one tests-only commit on `e14ef60`) | merged | Regression suite driving two colliding exchanges through a real `Server`; fails on upstream `main`, passes with #264. |
 
 Candidates being evaluated, in intended order:
 
 | Upstream PR | Fixes | Author | Why | Blocker / dependency |
 | ----------- | ----- | ------ | --- | -------------------- |
-| [#264](https://github.com/modelcontextprotocol/swift-sdk/pull/264) | [#254](https://github.com/modelcontextprotocol/swift-sdk/issues/254), [#265](https://github.com/modelcontextprotocol/swift-sdk/issues/265) | jstar0 | Stateless transport keys exchanges by a private id, so concurrent clients reusing a JSON-RPC id no longer displace each other's response waiter or HTTP context. Independently verified by the regression suite on `fix/254-response-waiter-collision`. | none — goes first |
 | [#260](https://github.com/modelcontextprotocol/swift-sdk/pull/260) | [#255](https://github.com/modelcontextprotocol/swift-sdk/issues/255) | ianegordon | A cancelled request's HTTP exchange completes with a JSON-RPC error instead of hanging. | must be rebased onto #264: its waiter lookup by raw id has to resolve through the exchange table |
 | [#270](https://github.com/modelcontextprotocol/swift-sdk/pull/270) | cancellation registration race | dariuscorvus | Cancellation arriving before a request's task is registered is no longer dropped. | evaluate after #264 and #260 |
 
@@ -76,6 +76,7 @@ on it, and each tag's notes list the manifest as of that tag.
 | `main` | Exact mirror of upstream `main`. Fast-forward only. Never carries a fork commit. | never |
 | `pr/<n>` | Mirror of upstream `refs/pull/<n>/head` at the SHA recorded in the manifest. Author's commits untouched. | only to track the upstream PR |
 | `pr/<n>-on-<base>` | An upstream PR rebased or conflict-resolved to sit on another included PR. The author's commits stay intact; the adaptation is a separate commit attributed to whoever did it. | as needed |
+| `pr/<n>-<topic>` | A fork addition stacked directly on `pr/<n>` (for example `pr/264-tests`): one clean commit, touching only what upstream will want, so it can be offered as a PR against the author's branch, as a follow-up upstream PR once `<n>` merges, or cherry-picked — the same commit serves all three. | only to rebase onto a moved `pr/<n>` |
 | `fix/<issue>-…` | This fork owner's own upstream-facing branches (for example `fix/254-response-waiter-collision`, `fix/255-cancellation-hang`). Each backs an open upstream PR and is kept mergeable against upstream `main`. | only to rebase onto a moved upstream `main` |
 | `integration` | `main` + the manifest, merged in order. **Default branch.** Merge-only: new PRs and `upstream/main` are merged in; it is not force-pushed. Protected against deletion and force pushes. | no (see below) |
 | `integration-next` | Scratch rebuild of `integration` from the manifest, used to check that the merge-only branch still equals a clean rebuild. Disposable. | freely |
