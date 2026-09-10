@@ -15,6 +15,9 @@ import Testing
         /// Error to be returned on send/receive operations
         private var mockError: Swift.Error?
 
+        /// Whether the peer has closed its side of the connection; see `receive`.
+        private var peerClosed = false
+
         /// Data queue for testing
         private var dataToReceive: [Data] = []
         private var sentData: [Data] = []
@@ -85,6 +88,14 @@ import Testing
                     return
                 }
 
+                if self.peerClosed {
+                    // No content, no error, `isComplete == true`: the shape
+                    // `NetworkTransport.receiveData()` reads as
+                    // "connection completed by peer".
+                    completion(nil, nil, true, nil)
+                    return
+                }
+
                 if self.dataToReceive.isEmpty {
                     completion(Data(), nil, false, nil)
                     return
@@ -122,6 +133,11 @@ import Testing
             } else {
                 updateState(.failed(NWError.posix(POSIXErrorCode(rawValue: 57)!)))
             }
+        }
+
+        /// Simulate the peer closing the connection gracefully
+        func simulatePeerClose() {
+            peerClosed = true
         }
 
         /// Simulate connection cancellation
@@ -660,6 +676,61 @@ import Testing
 
             // Verify connection is cleaned up
             #expect(weakConnection == nil, "Connection was not properly cleaned up")
+        }
+
+        // MARK: - Socket release when the receive loop gives up
+
+        // When reconnection is disabled (or exhausted) the receive loop
+        // finishes the message stream and exits. It must also cancel the
+        // underlying connection: otherwise the socket is never closed on
+        // this side and, once the peer has closed, sits in CLOSE_WAIT for
+        // the lifetime of the process. The mock's `cancel()` moves its
+        // state to `.cancelled`, which is the observable here.
+
+        @Test("Receive failure without reconnection cancels the connection")
+        func testReceiveFailureWithoutReconnectionCancelsConnection() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+            let messages = await transport.receive()
+
+            mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
+
+            // The stream finishes with the error...
+            await #expect(throws: MCPError.self) {
+                for try await _ in messages {}
+            }
+
+            // ...and the connection has been released, not left `.failed`.
+            #expect(mockConnection.state == .cancelled)
+        }
+
+        @Test("Peer close without reconnection cancels the connection")
+        func testPeerCloseWithoutReconnectionCancelsConnection() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+            let messages = await transport.receive()
+
+            mockConnection.simulatePeerClose()
+
+            // The stream finishes with `MCPError.connectionClosed`...
+            await #expect(throws: MCPError.self) {
+                for try await _ in messages {}
+            }
+
+            // ...and the connection has been released, not left `.ready`.
+            #expect(mockConnection.state == .cancelled)
         }
     }
 #endif
