@@ -28,13 +28,13 @@ merged in the listed order. This table is the manifest: a PR is on
 | ----- | ----------- | ----- | ------ | --------------- | ----------------------- | ----- |
 | 1 | [#264](https://github.com/modelcontextprotocol/swift-sdk/pull/264) | [#254](https://github.com/modelcontextprotocol/swift-sdk/issues/254), [#265](https://github.com/modelcontextprotocol/swift-sdk/issues/265) | jstar0 | `e14ef60` (branch `pr/264`) | merged | Stateless transport keys exchanges by a private id, so concurrent clients reusing a JSON-RPC id no longer displace each other's response waiter or HTTP context. |
 | 1a | — (fork addition, offered upstream with #264) | verification of #254, #265 | ianegordon | `53bf923` (branch `pr/264-tests`, one tests-only commit on `e14ef60`) | merged | Regression suite driving two colliding exchanges through a real `Server`; fails on upstream `main`, passes with #264. |
+| 2 | [#260](https://github.com/modelcontextprotocol/swift-sdk/pull/260) | [#255](https://github.com/modelcontextprotocol/swift-sdk/issues/255) | ianegordon | `b5da0ef` (branch `pr/260`); rebased onto #264 as `12b8c92` (branch `pr/260-on-264`) | merged | A cancelled request's HTTP exchange completes with a JSON-RPC error instead of hanging. The rebase routes the cancellation's `requestId` to the exchange id before forwarding it and adds a `Server` fallback to the id as given, so a cancelled handler still observes cancellation; ambiguous wire ids stay fail-closed. #264's byte-identical-forwarding assertion updated accordingly. |
 
 Candidates being evaluated, in intended order:
 
 | Upstream PR | Fixes | Author | Why | Blocker / dependency |
 | ----------- | ----- | ------ | --- | -------------------- |
-| [#260](https://github.com/modelcontextprotocol/swift-sdk/pull/260) | [#255](https://github.com/modelcontextprotocol/swift-sdk/issues/255) | ianegordon | A cancelled request's HTTP exchange completes with a JSON-RPC error instead of hanging. | must be rebased onto #264: its waiter lookup by raw id has to resolve through the exchange table |
-| [#270](https://github.com/modelcontextprotocol/swift-sdk/pull/270) | cancellation registration race | dariuscorvus | Cancellation arriving before a request's task is registered is no longer dropped. | evaluate after #264 and #260 |
+| [#270](https://github.com/modelcontextprotocol/swift-sdk/pull/270) | cancellation registration race | dariuscorvus | Cancellation arriving before a request's task is registered is no longer dropped. | evaluate next; touches the same `Server` cancellation path #260's rebase adjusted |
 
 Not included, and why:
 
