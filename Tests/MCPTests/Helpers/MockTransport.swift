@@ -35,6 +35,11 @@ actor MockTransport: Transport, HTTPContextProviding {
   private var requestedHTTPContextIDs: Set<ID> = []
   private var httpContextContinuations: [ID: CheckedContinuation<Void, Never>] = [:]
 
+    /// How many times `receive()` has been called. Each call hands out a
+    /// fresh stream, so a consumer that re-enters `receive()` after its
+    /// stream finishes shows up here as a count above one.
+    private(set) var receiveCallCount = 0
+
     var shouldFailConnect = false
     var shouldFailSend = false
 
@@ -63,6 +68,7 @@ actor MockTransport: Transport, HTTPContextProviding {
     }
 
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        receiveCallCount += 1
         return AsyncThrowingStream<Data, Swift.Error> { continuation in
             dataStreamContinuation = continuation
             for message in dataToReceive {
@@ -73,6 +79,14 @@ actor MockTransport: Transport, HTTPContextProviding {
             }
             dataToReceive.removeAll()
         }
+    }
+
+    /// Finish the current receive stream without disconnecting, the way a
+    /// real transport's stream ends when its peer goes away (for example a
+    /// stdio subprocess exiting).
+    func finishStream() {
+        dataStreamContinuation?.finish()
+        dataStreamContinuation = nil
     }
 
     func setFailConnect(_ shouldFail: Bool) {

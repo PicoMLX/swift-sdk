@@ -40,6 +40,49 @@ struct ClientTests {
         initTask.cancel()
     }
 
+    @Test("Message loop stops when the transport stream finishes")
+    func testMessageLoopStopsWhenStreamFinishes() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        _ = try await client.connect(transport: transport)
+        initTask.cancel()
+
+        // The handshake completed, so the message loop has taken its stream.
+        #expect(await transport.receiveCallCount == 1)
+
+        // The stream ends, as it does when a stdio subprocess dies. The loop
+        // must exit rather than ask the transport for another stream; a
+        // real transport hands back the same, already-finished stream, and
+        // re-entering it spins at 100% CPU.
+        await transport.finishStream()
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(await transport.receiveCallCount == 1)
+
+        await client.disconnect()
+    }
+
     @Test(
         "Ping request",
         .timeLimit(.minutes(1))
