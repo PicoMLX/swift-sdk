@@ -1,0 +1,145 @@
+# About this fork
+
+**`ianegordon/swift-sdk` is a temporary integration fork of
+[`modelcontextprotocol/swift-sdk`](https://github.com/modelcontextprotocol/swift-sdk).**
+
+[Upstream](https://github.com/modelcontextprotocol/swift-sdk) is canonical. 
+
+This is an UNOFFICIAL, UNSUPPORTED and hopefully short-lived fork.
+
+This fork exists to unblock some downstream dependencies by pulling in 
+some proposed fixes.
+
+This fork carries those fixes, pre-integrated and tested together, so
+that:
+
+1. upstream pull requests stay open and mergeable exactly as submitted, and
+2. downstream packages have a working alternative to depend on meanwhile.
+
+This fork is intended to be temporary and archived ASAP. See [Sunset](#sunset).
+
+## What is included
+
+The `integration` branch is upstream `main` plus the pull requests below,
+merged in the listed order. This table is the manifest: a PR is on
+`integration` if and only if it is listed here.
+
+| Order | Upstream PR | Fixes | Author | Head SHA merged | Status on `integration` | Notes |
+| ----- | ----------- | ----- | ------ | --------------- | ----------------------- | ----- |
+| _(none yet — first merges pending)_ | | | | | | |
+
+Candidates being evaluated, in intended order:
+
+| Upstream PR | Fixes | Author | Why | Blocker / dependency |
+| ----------- | ----- | ------ | --- | -------------------- |
+| [#264](https://github.com/modelcontextprotocol/swift-sdk/pull/264) | [#254](https://github.com/modelcontextprotocol/swift-sdk/issues/254), [#265](https://github.com/modelcontextprotocol/swift-sdk/issues/265) | jstar0 | Stateless transport keys exchanges by a private id, so concurrent clients reusing a JSON-RPC id no longer displace each other's response waiter or HTTP context. Independently verified by the regression suite on `fix/254-response-waiter-collision`. | none — goes first |
+| [#260](https://github.com/modelcontextprotocol/swift-sdk/pull/260) | [#255](https://github.com/modelcontextprotocol/swift-sdk/issues/255) | ianegordon | A cancelled request's HTTP exchange completes with a JSON-RPC error instead of hanging. | must be rebased onto #264: its waiter lookup by raw id has to resolve through the exchange table |
+| [#270](https://github.com/modelcontextprotocol/swift-sdk/pull/270) | cancellation registration race | dariuscorvus | Cancellation arriving before a request's task is registered is no longer dropped. | evaluate after #264 and #260 |
+
+Not included, and why:
+
+| Upstream PR | Reason |
+| ----------- | ------ |
+| [#267](https://github.com/modelcontextprotocol/swift-sdk/pull/267) | Rejects a colliding id with 409. Mutually exclusive with #264, and a 409 fails legitimate traffic (independent clients commonly start their id sequence at the same value). #264 is carried instead. |
+
+## Using the fork
+
+Same package name, same `MCP` product and module, so switching is a URL
+change and switching back is the same change reversed.
+
+Pin an exact fork tag. Fork tags use SemVer prerelease form on top of the
+upstream version they extend — `0.12.1-ianegordon.N` — so they can never be
+mistaken for an upstream release:
+
+```swift
+.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.1-ianegordon.1")
+```
+
+Two Swift Package Manager facts to know:
+
+- A `from:` or `upToNextMajor` range does not select prerelease versions:
+  the package manager only considers prereleases when a requirement's own
+  bounds carry prerelease identifiers, and an `exact:` requirement does
+  when its version does (`VersionSetSpecifier.supportsPrereleases`,
+  <https://github.com/swiftlang/swift-package-manager/blob/main/Sources/PackageGraph/VersionSetSpecifier.swift>).
+  An `exact:` pin is therefore the way to take a fork tag.
+- Depending on the `integration` branch directly works but is not
+  reproducible; tags are the contract, the branch is where they come from.
+
+Tags are cut only from `integration`, only after the full test suite passes
+on it, and each tag's notes list the manifest as of that tag.
+
+## Branch layout
+
+| Branch | Role | Rewritten? |
+| ------ | ---- | ---------- |
+| `main` | Exact mirror of upstream `main`. Fast-forward only. Never carries a fork commit. | never |
+| `pr/<n>` | Mirror of upstream `refs/pull/<n>/head` at the SHA recorded in the manifest. Author's commits untouched. | only to track the upstream PR |
+| `pr/<n>-on-<base>` | An upstream PR rebased or conflict-resolved to sit on another included PR. The author's commits stay intact; the adaptation is a separate commit attributed to whoever did it. | as needed |
+| `fix/<issue>-…` | This fork owner's own upstream-facing branches (for example `fix/254-response-waiter-collision`, `fix/255-cancellation-hang`). Each backs an open upstream PR and is kept mergeable against upstream `main`. | only to rebase onto a moved upstream `main` |
+| `integration` | `main` + the manifest, merged in order. **Default branch.** Merge-only: new PRs and `upstream/main` are merged in; it is not force-pushed. Protected against deletion and force pushes. | no (see below) |
+| `integration-next` | Scratch rebuild of `integration` from the manifest, used to check that the merge-only branch still equals a clean rebuild. Disposable. | freely |
+
+Conflicts between included PRs are resolved only in `pr/<n>-on-<base>`
+branches and, through them, on `integration`. The upstream-facing branches
+never absorb each other, which is what keeps every upstream PR mergeable as
+submitted.
+
+If a rebuild ever differs materially from the merge-only `integration` —
+for example an included PR was force-pushed upstream and its adaptation had
+to change — `integration` is replaced wholesale, a tag is cut, and the
+change is announced in the fork's issues. Consumers pinned to tags are
+unaffected.
+
+## Inclusion policy
+
+- **Bug fixes first.** Behavior changes and features are included only when
+  a downstream depending on this fork needs them, and the reason is recorded
+  in the manifest. Every addition beyond upstream makes the fork stickier,
+  and the goal is to disappear.
+- **One fix per problem.** Where two upstream PRs solve the same defect
+  differently, one is chosen and the choice is recorded with its reasoning
+  (see #264 versus #267 above).
+- **Nothing lands without the full suite passing on the combined branch.**
+  Where a PR lacks tests, regression tests are added on a fork branch and
+  offered upstream.
+- **Authorship is preserved.** PRs are merged, never cherry-picked and
+  edited. Author, committer, and `Signed-off-by` trailers stay as the author
+  wrote them. Contributions were submitted to upstream under Apache-2.0
+  §5, which is what permits carrying them here.
+- **Authors are told.** Each included PR gets one comment saying it is
+  carried here, at which commit, and that it will be dropped once merged
+  upstream.
+
+## Reporting problems
+
+Report defects **upstream first**, then, if the fork needs to track it, open
+a fork issue that links the upstream one. Fixes should be submitted as
+**upstream pull requests**; this fork picks them up from there. Please do 
+NOT open PRs against ianegordon/swift-sdk directly. Problems in the
+integration itself (a bad merge, a broken tag) are fork issues.
+
+## Sunset
+
+- As each included PR merges upstream, it is dropped from the manifest and
+  `integration` is rebuilt on the new upstream `main`, so the fork shrinks
+  on its own.
+- When the manifest is empty and the remaining PRs have a path, a final tag 
+  is cut, this file and the README banner are updated to 
+  "superseded — use upstream", and the repository is **archived**, not deleted. 
+  Archived repositories stay resolvable, so no consumer's `Package.resolved` 
+  breaks.
+
+## Maintenance procedure
+
+Until this is scripted, the steps are manual and this file is the record.
+
+1. `git fetch upstream && git push origin upstream/main:main` — refresh the
+   mirror (fast-forward only).
+2. For each manifest row in order: fetch `refs/pull/<n>/head`, confirm the
+   SHA matches the manifest (record a change if the author pushed), and
+   merge `pr/<n>` or its `-on-<base>` adaptation into `integration`.
+3. `swift test` on `integration`; nothing is tagged on a red suite.
+4. Tag `0.<upstream>-ianegordon.<N>` on `integration` with the manifest in
+   the tag message.
+5. Update this file's manifest table.

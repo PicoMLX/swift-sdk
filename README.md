@@ -1,5 +1,13 @@
 # MCP Swift SDK
 
+> **Temporary integration fork.** This is `ianegordon/swift-sdk`, not the
+> official repository. It carries a small, tested set of fixes from open
+> upstream pull requests while upstream is under-resourced, and will be
+> archived once they merge. Upstream is canonical:
+> [modelcontextprotocol/swift-sdk](https://github.com/modelcontextprotocol/swift-sdk).
+> What is included, how to depend on it, and the sunset plan are in
+> [`FORK.md`](FORK.md).
+
 Official Swift SDK for the [Model Context Protocol][mcp] (MCP).
 
 ## Overview
