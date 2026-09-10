@@ -31,11 +31,20 @@ merged in the listed order. This table is the manifest: a PR is on
 | 2 | [#260](https://github.com/modelcontextprotocol/swift-sdk/pull/260) | [#255](https://github.com/modelcontextprotocol/swift-sdk/issues/255) | ianegordon | `b5da0ef` (branch `pr/260`); rebased onto #264 as `12b8c92` (branch `pr/260-on-264`) | merged | A cancelled request's HTTP exchange completes with a JSON-RPC error instead of hanging. The rebase routes the cancellation's `requestId` to the exchange id before forwarding it and adds a `Server` fallback to the id as given, so a cancelled handler still observes cancellation; ambiguous wire ids stay fail-closed. #264's byte-identical-forwarding assertion updated accordingly. |
 | 3 | [#270](https://github.com/modelcontextprotocol/swift-sdk/pull/270) | [#285](https://github.com/modelcontextprotocol/swift-sdk/issues/285) | dariuscorvus | `0f38081` (branch `pr/270`); merged onto `integration` via `pr/270-on-integration`, adaptation in the merge resolution | merged | A cancellation arriving before the request's handler task is registered no longer falls through the gap; the built-in cancellation handler runs before logging can suspend. Adaptation: #264's handler-context id mapping kept alongside #270's early cancellation check; #270's `cancelRequest(id:)` is fed the routed id with the #260 fallback. Beyond the bug: duplicate outstanding request ids are rejected with `invalidRequest` (behavior change — inert on HTTP under #264, correct on single-client transports where a duplicate is a client error), and late responses from handlers that swallow cancellation are suppressed. Author's commit indentation is inconsistent with the file; left as authored, review feedback for upstream. |
 
-Candidates being evaluated, in intended order:
+Candidates being evaluated, in intended order. All seven apply cleanly to
+`integration` as of 2026-09-10 and none touches a file the fork has already
+adapted; the order is easiest integration first, then impact. Each has a
+tracking issue on this fork (`Upstream PR#<n> - Merge`).
 
-| Upstream PR | Fixes | Author | Why | Blocker / dependency |
-| ----------- | ----- | ------ | --- | -------------------- |
-| _(none queued)_ | | | | |
+| Order | Upstream PR | Fixes | Author | Why | Notes |
+| ----- | ----------- | ----- | ------ | --- | ----- |
+| 4 | [#283](https://github.com/modelcontextprotocol/swift-sdk/pull/283) | [#282](https://github.com/modelcontextprotocol/swift-sdk/issues/282) | skirrellyjones | `NetworkTransport` leaks one file descriptor (`CLOSE_WAIT`) per client disconnect when reconnection is disabled. | 5 lines, 1 file. Pure bug fix. |
+| 5 | [#221](https://github.com/modelcontextprotocol/swift-sdk/pull/221) | [#256](https://github.com/modelcontextprotocol/swift-sdk/issues/256) | piersdd | `Client` message loop spins at 100% CPU once the transport stream finishes. | 26/37 lines, 1 file. Maintainer-approved upstream. Before #276, which also touches `Client.swift`. Supersedes #171 and #275. |
+| 6 | [#227](https://github.com/modelcontextprotocol/swift-sdk/pull/227) | — | samkudr | `Value.init(_:)` requires `Codable` where only `Encodable` is used. | 3 lines, 1 file. Strictly loosening. Before #278, which also touches `Value.swift`. |
+| 7 | [#279](https://github.com/modelcontextprotocol/swift-sdk/pull/279) | — | onetamer | Windows builds fail: `EventSource` is imported behind `#if !os(Linux)` but only provided on Apple platforms. | 5 lines, 1 file. No behavior change on platforms that built before. |
+| 8 | [#269](https://github.com/modelcontextprotocol/swift-sdk/pull/269) | — | shoemoney | Conformance server lists a resource template under `resources/list` with an invalid URI. | 6 lines, 1 file, test harness only. |
+| 9 | [#276](https://github.com/modelcontextprotocol/swift-sdk/pull/276) | [#262](https://github.com/modelcontextprotocol/swift-sdk/issues/262) | nstrm | Servers cannot decode ChatGPT's `initialize`: `Client.Capabilities.experimental` is `[String: String]` where the spec allows arbitrary objects. | 62 lines, 2 files. **Public type change** (`experimental` becomes `[String: Value]`, `extensions` added); source-compatible for string literals. Record in the manifest. |
+| 10 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `Value.init(from:)` silently turns any data-URL-looking string into `.data`, altering content on round trip. | 185 lines, 3 files. **Behavior change** toward correctness; explicit `Value.data` and the data-URL helpers remain. Last because it is the largest and the second edit to `NetworkTransport.swift` and `Value.swift` in the batch. |
 
 Not included, and why:
 
