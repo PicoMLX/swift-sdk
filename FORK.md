@@ -5,7 +5,7 @@
 
 [Upstream](https://github.com/modelcontextprotocol/swift-sdk) is canonical. 
 
-This is an UNOFFICIAL, UNSUPPORTED and hopefully short-lived fork.
+This is an UNOFFICIAL and hopefully short-lived fork.
 
 This fork exists to unblock some downstream dependencies by pulling in 
 some proposed fixes.
@@ -68,7 +68,7 @@ upstream release, and it sorts correctly before a real `0.12.2` if upstream
 ships one. `N` increments per fork tag on the same base:
 
 ```swift
-.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.1")
+.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.5")
 ```
 
 Two Swift Package Manager facts to know:
