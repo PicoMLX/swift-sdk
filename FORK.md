@@ -42,17 +42,17 @@ tracking issue on this fork (`Upstream PR#<n> - Merge`).
 
 | Order | Upstream PR | Fixes | Author | Why | Notes |
 | ----- | ----------- | ----- | ------ | --- | ----- |
-| 6 | [#227](https://github.com/modelcontextprotocol/swift-sdk/pull/227) | — | samkudr | `Value.init(_:)` requires `Codable` where only `Encodable` is used. | 3 lines, 1 file. Strictly loosening. Before #278, which also touches `Value.swift`. |
-| 7 | [#279](https://github.com/modelcontextprotocol/swift-sdk/pull/279) | — | onetamer | Windows builds fail: `EventSource` is imported behind `#if !os(Linux)` but only provided on Apple platforms. | 5 lines, 1 file. No behavior change on platforms that built before. |
-| 8 | [#269](https://github.com/modelcontextprotocol/swift-sdk/pull/269) | — | shoemoney | Conformance server lists a resource template under `resources/list` with an invalid URI. | 6 lines, 1 file, test harness only. |
-| 9 | [#276](https://github.com/modelcontextprotocol/swift-sdk/pull/276) | [#262](https://github.com/modelcontextprotocol/swift-sdk/issues/262) | nstrm | Servers cannot decode ChatGPT's `initialize`: `Client.Capabilities.experimental` is `[String: String]` where the spec allows arbitrary objects. | 62 lines, 2 files. **Public type change** (`experimental` becomes `[String: Value]`, `extensions` added); source-compatible for string literals. Record in the manifest. |
-| 10 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `Value.init(from:)` silently turns any data-URL-looking string into `.data`, altering content on round trip. | 185 lines, 3 files. **Behavior change** toward correctness; explicit `Value.data` and the data-URL helpers remain. Last because it is the largest and the second edit to `NetworkTransport.swift` and `Value.swift` in the batch. |
+| 6 | [#279](https://github.com/modelcontextprotocol/swift-sdk/pull/279) | — | onetamer | Windows builds fail: `EventSource` is imported behind `#if !os(Linux)` but only provided on Apple platforms. | 5 lines, 1 file. No behavior change on platforms that built before. |
+| 7 | [#269](https://github.com/modelcontextprotocol/swift-sdk/pull/269) | — | shoemoney | Conformance server lists a resource template under `resources/list` with an invalid URI. | 6 lines, 1 file, test harness only. |
+| 8 | [#276](https://github.com/modelcontextprotocol/swift-sdk/pull/276) | [#262](https://github.com/modelcontextprotocol/swift-sdk/issues/262) | nstrm | Servers cannot decode ChatGPT's `initialize`: `Client.Capabilities.experimental` is `[String: String]` where the spec allows arbitrary objects. | 62 lines, 2 files. **Public type change** (`experimental` becomes `[String: Value]`, `extensions` added); source-compatible for string literals. Record in the manifest. |
+| 9 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `Value.init(from:)` silently turns any data-URL-looking string into `.data`, altering content on round trip. | 185 lines, 3 files. **Behavior change** toward correctness; explicit `Value.data` and the data-URL helpers remain. Last because it is the largest and the second edit to `NetworkTransport.swift` in the batch. |
 
 Not included, and why:
 
 | Upstream PR | Reason |
 | ----------- | ------ |
 | [#267](https://github.com/modelcontextprotocol/swift-sdk/pull/267) | Rejects a colliding id with 409. Mutually exclusive with #264, and a 409 fails legitimate traffic (independent clients commonly start their id sequence at the same value). #264 is carried instead. |
+| [#227](https://github.com/modelcontextprotocol/swift-sdk/pull/227) | Relaxes `Value.init(_:)` from `Codable` to `Encodable`. Correct — the initializer's only use of `T` is `JSONEncoder.encode(_:)` — but it fixes no bug, and unlike every other entry carried here its absence upstream causes a compile error rather than a runtime fault. Code written against the fork with an `Encodable`-only type would not build on upstream unless #227 lands there, which would block the return this fork exists to make easy. Not worth that for an API loosening no downstream currently needs. |
 
 ## Using the fork
 
