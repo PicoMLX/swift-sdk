@@ -37,15 +37,20 @@ merged in the listed order. This table is the manifest: a PR is on
 | 6 | [#269](https://github.com/modelcontextprotocol/swift-sdk/pull/269) | — | shoemoney | `4a7d8ef` (branch `pr/269`) | merged | The everything-server listed `test://template/{id}` under `resources/list` and registered no `ListResourceTemplates` handler, so the template was advertised at the wrong endpoint and reachable at neither — `resources/templates/list` answered `-32601`. Spec-correct per the 2025-11-25 schema: `Resource.uri` is `format: uri`, `ResourceTemplate.uriTemplate` is `format: uri-template` (RFC 6570). Six lines, no adaptation. The PR's stated justification does not reproduce — `resources-list` passes on runner 0.1.15 (the version `ci.yml` pins) and 0.1.16 on every suite, because JSON Schema `format` is annotation-only by default — so this fixes a latent spec violation, not a failing test. Conformance harness only; the `MCP` library is untouched, so no downstream is affected either way. Tracking: fork issue #10. |
 | 7 | [#276](https://github.com/modelcontextprotocol/swift-sdk/pull/276) | [#262](https://github.com/modelcontextprotocol/swift-sdk/issues/262) | nstrm | `f7077e0` (branch `pr/276`) | merged | `Client.Capabilities.experimental` was `[String: String]`, but the 2025-11-25 schema defines it as a map of arbitrary objects, so a ChatGPT-shaped `initialize` carrying `{"openai/visibility": {"enabled": true}}` failed to decode and the server answered `-32603` to a valid request. Reproduced on the wire before the merge and confirmed fixed after. **Source-breaking public type change:** `experimental` becomes `[String: Value]` — a dictionary literal with string values still compiles because `Value` is `ExpressibleByStringLiteral`, but a typed `[String: String]` variable and reading a value back as `String` do not. Entry 7a restores the first of those. Also adds `extensions` as `[String: Value]`, which is a **draft-schema** capability absent from 2025-11-25; an unmodeled key already decoded fine, so that half is a feature, not a fix. Ships its own two tests. Tracking: fork issue #11. |
 | 7a | — (fork addition, to be offered upstream with #276) | source compatibility for #276 | ianegordon | `604afd2` (branch `pr/276-compat`, one commit on `f7077e0`) | merged | A deprecated `[String: String]` initializer for `Client.Capabilities`, so an existing typed variable still compiles behind a warning. `experimental` is required and undefaulted deliberately: with every parameter defaulted, overload resolution routes the bare `Client.Capabilities()` call to the compatibility initializer and warns on it, which is noise unrelated to `experimental`. Reading a value back as `String` is **not** restored — `experimental` is a stored property and Swift has no second property of the same name, so consumers that read values out still need updating. Follows the deprecated compatibility factories at `Sources/MCP/Server/Tools.swift:131`. |
+| 8 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `af48e3f` (branch `pr/278`) | merged | `Value.init(from:)` treated any parseable data-URL-looking JSON string as `.data`, silently changing both the case and the string's spelling. Content explicitly tagged as MCP text was corrupted on round trip: `data:text/plain,Hello%20World` came back as `data:text/plain;base64,SGVsbG8gV29ybGQ=`. Generic JSON carries no discriminator and the spec tags content explicitly (`TextContent.type` is `const "text"`), so the decoder had no business guessing. The string branch now always produces `.string`; `Data.isDataURL(string:)` and `Data.parseDataURL(_:)` stay public for opt-in parsing and explicit `Value.data` encoding is unchanged. Verified by running the PR's own tests against the unpatched tree first — six of eight fail there, all eight pass after. **Behavior change, not a source break:** no API signature moves, so fork code calling `parseDataURL` explicitly compiles and behaves identically against upstream; no return trap. Caveat: `Value.data` is now round-trip-asymmetric — it encodes as a data URL but decodes back as `.string` — which the PR pins with a test. Nothing inside the SDK consumed the sniffing. The unrelated `NetworkTransport` capture-list hunk (`Task { @MainActor [self] in`) is behaviorally inert and warning-free on this toolchain; left as authored, review feedback for upstream. Tracking: fork issue #12. |
 
-Candidates being evaluated, in intended order. All of these applied cleanly to
-`integration` as of 2026-09-10 and none touches a file the fork has already
-adapted; the order is easiest integration first, then impact. Each has a
-tracking issue on this fork (`Upstream PR#<n> - Merge`).
+Candidates being evaluated, in intended order: easiest integration first,
+then impact. Each has a tracking issue on this fork
+(`Upstream PR#<n> - Merge`).
 
 | Order | Upstream PR | Fixes | Author | Why | Notes |
 | ----- | ----------- | ----- | ------ | --- | ----- |
-| 6 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `Value.init(from:)` silently turns any data-URL-looking string into `.data`, altering content on round trip. | 185 lines, 3 files. **Behavior change** toward correctness; explicit `Value.data` and the data-URL helpers remain. Last because it is the largest and the second edit to `NetworkTransport.swift` in the batch. |
+
+None outstanding. Every PR triaged Merge has been integrated or declined.
+The next candidates will come from the twelve upstream PRs triaged
+Investigate, tracked in this fork's issues under the `investigate` label
+(`Upstream PR#<n> - Investigate`); one moves into this table if investigation
+promotes it to Merge.
 
 Not included, and why:
 
@@ -69,7 +74,7 @@ upstream release, and it sorts correctly before a real `0.12.2` if upstream
 ships one. `N` increments per fork tag on the same base:
 
 ```swift
-.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.7")
+.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.8")
 ```
 
 Two Swift Package Manager facts to know:
