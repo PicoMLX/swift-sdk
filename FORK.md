@@ -34,6 +34,7 @@ merged in the listed order. This table is the manifest: a PR is on
 | 4a | — (fork addition, to be offered upstream with #283) | verification of #282 | ianegordon | `2e80db4` (branch `pr/283-tests`, one tests-only commit on `c0ce9d6`) | merged | Two mock-based `NetworkTransport` tests: with reconnection disabled, a receive failure and a graceful peer close must each finish the message stream and leave the connection cancelled. Fail on `pr/283~1` (mock left `.failed` / `.ready`), pass with #283. |
 | 5 | [#221](https://github.com/modelcontextprotocol/swift-sdk/pull/221) | [#256](https://github.com/modelcontextprotocol/swift-sdk/issues/256) | piersdd | `42c30a1` (branch `pr/221`) | merged | `Client.connect` wrapped its receive loop in `repeat { … } while true`; once the transport's stream finished (peer gone, stdio subprocess exited) the loop re-entered the already-finished stream forever at 100% CPU. Flattened to the pattern `Server` uses. The removed EAGAIN retry arm was unreachable: `StdioTransport` retries EAGAIN inside its own read loop and never surfaces it through the stream. Maintainer-approved upstream. Supersedes #171 and #275. Tracking: fork issue #4. |
 | 5a | — (fork addition, to be offered upstream with #221) | verification of #256 | ianegordon | `a50910c` (branch `pr/221-tests`, one tests-only commit on `42c30a1`) | merged | `MockTransport` counts `receive()` calls and can finish its stream without disconnecting; a connected `Client` whose stream ends must not request a second stream. Fails on `pr/221~1` (count reaches 2), passes with #221. |
+| 6 | [#269](https://github.com/modelcontextprotocol/swift-sdk/pull/269) | — | shoemoney | `4a7d8ef` (branch `pr/269`) | merged | The everything-server listed `test://template/{id}` under `resources/list` and registered no `ListResourceTemplates` handler, so the template was advertised at the wrong endpoint and reachable at neither — `resources/templates/list` answered `-32601`. Spec-correct per the 2025-11-25 schema: `Resource.uri` is `format: uri`, `ResourceTemplate.uriTemplate` is `format: uri-template` (RFC 6570). Six lines, no adaptation. The PR's stated justification does not reproduce — `resources-list` passes on runner 0.1.15 (the version `ci.yml` pins) and 0.1.16 on every suite, because JSON Schema `format` is annotation-only by default — so this fixes a latent spec violation, not a failing test. Conformance harness only; the `MCP` library is untouched, so no downstream is affected either way. Tracking: fork issue #10. |
 
 Candidates being evaluated, in intended order. All of these applied cleanly to
 `integration` as of 2026-09-10 and none touches a file the fork has already
@@ -42,9 +43,8 @@ tracking issue on this fork (`Upstream PR#<n> - Merge`).
 
 | Order | Upstream PR | Fixes | Author | Why | Notes |
 | ----- | ----------- | ----- | ------ | --- | ----- |
-| 6 | [#269](https://github.com/modelcontextprotocol/swift-sdk/pull/269) | — | shoemoney | Conformance server lists a resource template under `resources/list` with an invalid URI. | 6 lines, 1 file, test harness only. |
-| 7 | [#276](https://github.com/modelcontextprotocol/swift-sdk/pull/276) | [#262](https://github.com/modelcontextprotocol/swift-sdk/issues/262) | nstrm | Servers cannot decode ChatGPT's `initialize`: `Client.Capabilities.experimental` is `[String: String]` where the spec allows arbitrary objects. | 62 lines, 2 files. **Public type change** (`experimental` becomes `[String: Value]`, `extensions` added); source-compatible for string literals. Record in the manifest. |
-| 8 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `Value.init(from:)` silently turns any data-URL-looking string into `.data`, altering content on round trip. | 185 lines, 3 files. **Behavior change** toward correctness; explicit `Value.data` and the data-URL helpers remain. Last because it is the largest and the second edit to `NetworkTransport.swift` in the batch. |
+| 6 | [#276](https://github.com/modelcontextprotocol/swift-sdk/pull/276) | [#262](https://github.com/modelcontextprotocol/swift-sdk/issues/262) | nstrm | Servers cannot decode ChatGPT's `initialize`: `Client.Capabilities.experimental` is `[String: String]` where the spec allows arbitrary objects. | 62 lines, 2 files. **Public type change** (`experimental` becomes `[String: Value]`, `extensions` added); source-compatible for string literals. Record in the manifest. |
+| 7 | [#278](https://github.com/modelcontextprotocol/swift-sdk/pull/278) | [#277](https://github.com/modelcontextprotocol/swift-sdk/issues/277) | bitbemol | `Value.init(from:)` silently turns any data-URL-looking string into `.data`, altering content on round trip. | 185 lines, 3 files. **Behavior change** toward correctness; explicit `Value.data` and the data-URL helpers remain. Last because it is the largest and the second edit to `NetworkTransport.swift` in the batch. |
 
 Not included, and why:
 
@@ -68,7 +68,7 @@ upstream release, and it sorts correctly before a real `0.12.2` if upstream
 ships one. `N` increments per fork tag on the same base:
 
 ```swift
-.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.5")
+.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.6")
 ```
 
 Two Swift Package Manager facts to know:
