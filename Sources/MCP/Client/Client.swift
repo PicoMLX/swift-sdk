@@ -145,6 +145,29 @@ public actor Client {
             self.extensions = extensions
             self.roots = roots
         }
+
+        /// Deprecated compatibility initializer for call sites that pass `experimental`
+        /// as `[String: String]`. Each value is wrapped as `Value.string`.
+        ///
+        /// `experimental` is deliberately non-optional and without a default so that
+        /// `Client.Capabilities()` and every call that omits `experimental` continue to
+        /// resolve to the designated initializer, warning-free.
+        @available(
+            *, deprecated,
+            message: "experimental is now [String: Value]; use init(sampling:elicitation:experimental:extensions:roots:)"
+        )
+        public init(
+            sampling: Sampling? = nil,
+            elicitation: Elicitation? = nil,
+            experimental: [String: String],
+            roots: Capabilities.Roots? = nil
+        ) {
+            self.sampling = sampling
+            self.elicitation = elicitation
+            self.experimental = experimental.mapValues { Value.string($0) }
+            self.extensions = nil
+            self.roots = roots
+        }
     }
 
     /// The connection to the server

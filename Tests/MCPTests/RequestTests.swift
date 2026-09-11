@@ -261,6 +261,31 @@ struct RequestTests {
         #expect(decoded == capabilities)
     }
 
+    @Test("Deprecated [String: String] experimental initializer wraps values as .string")
+    @available(*, deprecated, message: "Exercises the deprecated compatibility initializer on purpose")
+    func testDeprecatedStringExperimentalInitializer() throws {
+        let legacy: [String: String] = ["openai/visibility": "on"]
+        let capabilities = Client.Capabilities(experimental: legacy)
+
+        #expect(capabilities.experimental == ["openai/visibility": .string("on")])
+        #expect(capabilities.extensions == nil)
+
+        // The wire form is unchanged from what the old [String: String] type produced.
+        let data = try JSONEncoder().encode(capabilities)
+        let decoded = try JSONDecoder().decode(Client.Capabilities.self, from: data)
+        #expect(decoded == capabilities)
+    }
+
+    @Test("Omitting experimental resolves to the designated initializer")
+    func testDefaultCapabilitiesAreNotDeprecated() throws {
+        // Must compile without a deprecation warning: the compatibility initializer
+        // takes experimental as a required parameter so it cannot match this call.
+        let capabilities = Client.Capabilities()
+
+        #expect(capabilities.experimental == nil)
+        #expect(capabilities.extensions == nil)
+    }
+
     @Test("Invalid parameters request decoding")
     func testInvalidParametersRequestDecoding() throws {
         let jsonString = """
