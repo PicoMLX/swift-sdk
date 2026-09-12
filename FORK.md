@@ -45,17 +45,17 @@ merged in the listed order. This table is the manifest: a PR is on
 | 10b | — (fork addition, to be offered upstream with #275) | first defect in entry 10 | ianegordon | `b7cb156` (branch `pr/275-lifecycle`, one commit on `607c6dd`) | merged | Entry 10's `addPendingRequest` resumes an already-cancelled continuation and returns early, but the early return only exits that function — the enclosing task still transmitted the request, so a cancellation went out *ahead of* the request it cancels and the peer executed a request whose caller had already been told it was cancelled. `addPendingRequest` now reports whether the request is pending and `send` skips transmission when it is not. A cancellation notification may still precede a request that is never sent; receivers may ignore unknown ids, which is strictly better than running a cancelled operation. Scope: this covers cancellation arriving *before registration*, not cancellation overtaking a send already suspended in `connection.send`. Test note: the window is unreachable from outside — 50 iterations of cancel-immediately-after-`Task` never once landed in it, so a naive test passes regardless. It is driven deterministically by cancelling from inside the same actor hop as `send`, before the queued registration task can run; technique borrowed from the #275 review probes. Verified in both directions, the failure quoting the inverted wire order. |
 
 Candidates being evaluated, in intended order: easiest integration first,
-then impact. Each has a tracking issue on this fork
-(`Upstream PR#<n> - Merge`).
+then impact. Each has a tracking issue on this fork, titled `Upstream PR#<n>`
+and labelled `merge`. The label carries the triage decision — `merge`,
+`investigate` or `decline` — so the title does not repeat it.
 
 | Order | Upstream PR | Fixes | Author | Why | Notes |
 | ----- | ----------- | ----- | ------ | --- | ----- |
 
-None outstanding. Every PR triaged Merge has been integrated or declined.
-The next candidates will come from the twelve upstream PRs triaged
-Investigate, tracked in this fork's issues under the `investigate` label
-(`Upstream PR#<n> - Investigate`); one moves into this table if investigation
-promotes it to Merge.
+None outstanding. Every PR triaged `merge` has been integrated or declined.
+The next candidates will come from the six upstream PRs still labelled
+`investigate` — #178, #213, #216, #257, #258 and #259 — one of which moves
+into this table if investigation promotes it to `merge`.
 
 Not included, and why:
 
