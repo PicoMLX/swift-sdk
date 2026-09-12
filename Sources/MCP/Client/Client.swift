@@ -440,12 +440,19 @@ public actor Client {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     Task {
-                        // Add the pending request before attempting to send
-                        self.addPendingRequest(
-                            id: request.id,
-                            continuation: continuation,
-                            type: M.Result.self
-                        )
+                        // Add the pending request before attempting to send.
+                        // A cancellation that arrived first has already resumed
+                        // the continuation, and the request must not be sent:
+                        // the peer would ignore the cancellation as referring to
+                        // an unknown id and then execute a request its caller
+                        // has already been told was cancelled.
+                        guard
+                            self.addPendingRequest(
+                                id: request.id,
+                                continuation: continuation,
+                                type: M.Result.self
+                            )
+                        else { return }
 
                         // Send the request data
                         do {
@@ -528,20 +535,28 @@ public actor Client {
         return try await context.value
     }
 
+    /// Registers a pending request, unless it was already cancelled.
+    ///
+    /// - Returns: `true` if the request is now pending and its caller should go
+    ///   on to send it; `false` if a cancellation arrived first, in which case
+    ///   the continuation has already been resumed and the request **must not**
+    ///   be put on the wire.
+    @discardableResult
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type  // Keep type for AnyPendingRequest internal logic
-    ) {
+    ) -> Bool {
         // Cancelled while this registration was still on its way: resume now,
         // there is nobody else left to do it.
         if cancelledBeforeRegistration.remove(id) != nil {
             continuation.resume(throwing: CancellationError())
-            return
+            return false
         }
         pendingRequests[id] = AnyPendingRequest(
             PendingRequest(continuation: continuation)
         )
+        return true
     }
 
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
