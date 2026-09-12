@@ -217,6 +217,13 @@ public actor Client {
     /// after and never resumed by anyone: the caller would hang forever on the
     /// very cancellation meant to free it.
     private var cancelledBeforeRegistration: Set<ID> = []
+    /// The id of the in-flight `initialize` request, if any.
+    ///
+    /// ``cancelRequest(_:reason:)`` takes an ``ID`` rather than a method, so the
+    /// one request a client may not cancel on the wire has to be recognised by
+    /// id. Enforcing it there covers both the public API and the automatic task
+    /// cancellation handler in ``send(_:)``.
+    private var initializeRequestID: ID?
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -321,6 +328,7 @@ public actor Client {
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
         self.cancelledBeforeRegistration = []
+        self.initializeRequestID = nil
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -475,6 +483,28 @@ public actor Client {
     /// - Throws: MCPError if the notification cannot be sent
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
+        cancelRequestLocally(requestID)
+
+        // "The `initialize` request MUST NOT be cancelled by clients"
+        // (2025-11-25, basic/utilities/cancellation). The caller has been freed
+        // above; withholding the notification is the whole of the restriction.
+        // This is the single enforcement point: the automatic cancellation
+        // handler in `send(_:)` routes through here too.
+        guard requestID != initializeRequestID else { return }
+
+        // Send cancellation notification to server
+        let notification = CancelledNotification.message(
+            .init(requestId: requestID, reason: reason)
+        )
+        try await notify(notification)
+    }
+
+    /// Frees a cancelled request on this side without putting anything on the wire.
+    ///
+    /// Used where the spec forbids telling the peer: the `initialize` request
+    /// **MUST NOT** be cancelled by clients, so a cancelled `connect()` must still
+    /// release its caller without sending `notifications/cancelled` for it.
+    private func cancelRequestLocally(_ requestID: ID) {
         // Remove the pending request and resume with cancellation error
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
@@ -484,12 +514,6 @@ public actor Client {
             // registration, when it happens, resumes immediately.
             cancelledBeforeRegistration.insert(requestID)
         }
-
-        // Send cancellation notification to server
-        let notification = CancelledNotification.message(
-            .init(requestId: requestID, reason: reason)
-        )
-        try await notify(notification)
     }
 
     /// Send a request and receive its response immediately.
@@ -693,6 +717,7 @@ public actor Client {
                 capabilities: capabilities,
                 clientInfo: clientInfo
             ))
+        initializeRequestID = request.id
 
         let result = try await sendAndAwait(request)
 
