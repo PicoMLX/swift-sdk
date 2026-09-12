@@ -40,6 +40,110 @@ struct ClientTests {
         initTask.cancel()
     }
 
+    /// Wire messages with JSON's escaped slashes normalised, so `notifications/cancelled`
+    /// matches what `JSONEncoder` actually emits (`notifications\/cancelled`).
+    private func wire(_ transport: MockTransport) async -> [String] {
+        await transport.sentMessages.map { $0.replacingOccurrences(of: "\\/", with: "/") }
+    }
+
+    /// Waits for `condition` or fails at the deadline, so a regression reports a
+    /// failure instead of hanging the suite.
+    private func waitFor(
+        _ label: String, timeout: Duration = .seconds(3),
+        _ condition: @Sendable () async -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("timed out waiting for \(label)")
+        return false
+    }
+
+    @Test("Cancelling connect does not cancel initialize on the wire")
+    func testCancelledConnectSendsNoCancellationForInitialize() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // No initialize response is queued, so connect() stays pending until
+        // cancelled — the case #275 names as its motivation.
+        let connect = Task { try await client.connect(transport: transport) }
+        #expect(
+            await waitFor("the initialize request to be sent") {
+                await self.wire(transport).contains { $0.contains("\"method\":\"initialize\"") }
+            })
+
+        connect.cancel()
+
+        // The caller must be released, with CancellationError, within the deadline.
+        let outcome: String = await withTaskGroup(of: String?.self) { group in
+            group.addTask {
+                do {
+                    _ = try await connect.value
+                    return "returned a result"
+                } catch is CancellationError {
+                    return "CancellationError"
+                } catch {
+                    return "threw \(type(of: error))"
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(3))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? "did not settle before the deadline"
+        }
+        #expect(outcome == "CancellationError", "cancelled connect resolved as: \(outcome)")
+
+        // "The `initialize` request MUST NOT be cancelled by clients."
+        let cancellations = await wire(transport).filter {
+            $0.contains("notifications/cancelled")
+        }
+        #expect(cancellations.isEmpty, "initialize was cancelled on the wire: \(cancellations)")
+
+        await client.disconnect()
+    }
+
+    @Test("cancelRequest does not cancel initialize on the wire")
+    func testPublicCancelRequestSendsNoCancellationForInitialize() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        let connect = Task { try await client.connect(transport: transport) }
+        #expect(
+            await waitFor("the initialize request to be sent") {
+                await self.wire(transport).contains { $0.contains("\"method\":\"initialize\"") }
+            })
+
+        // Recover the id the client used, then cancel it through the public API —
+        // the path the automatic handler does not go through.
+        let sent = await wire(transport)
+        guard let initializeFrame = sent.first(where: { $0.contains("\"method\":\"initialize\"") }),
+            let data = initializeFrame.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let id = object["id"] as? String
+        else {
+            Issue.record("could not recover the initialize request id")
+            return
+        }
+
+        try await client.cancelRequest(.string(id), reason: "test")
+
+        let cancellations = await wire(transport).filter {
+            $0.contains("notifications/cancelled")
+        }
+        #expect(
+            cancellations.isEmpty,
+            "initialize was cancelled on the wire through the public API: \(cancellations)")
+
+        connect.cancel()
+        _ = try? await connect.value
+        await client.disconnect()
+    }
+
     @Test("Message loop stops when the transport stream finishes")
     func testMessageLoopStopsWhenStreamFinishes() async throws {
         let transport = MockTransport()
