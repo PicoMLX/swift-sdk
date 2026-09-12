@@ -227,6 +227,16 @@ import struct Foundation.Data
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try await Task.sleep(for: .milliseconds(10))
+                    // The transport may have been disconnected while this write was
+                    // parked on backpressure. Without re-checking, the retry loop
+                    // spins every 10ms for as long as the reader stays stalled, and
+                    // because sends are serialized, everything queued behind it waits
+                    // with it. Abandoning a partially written frame is safe here and
+                    // only here: the transport is being torn down, so there is no
+                    // peer left to mis-frame.
+                    guard isConnected else {
+                        throw MCPError.transportError(Errno(rawValue: ENOTCONN))
+                    }
                     continue
                 } catch {
                     throw MCPError.transportError(error)
