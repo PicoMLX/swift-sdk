@@ -76,7 +76,7 @@ upstream release, and it sorts correctly before a real `0.12.2` if upstream
 ships one. `N` increments per fork tag on the same base:
 
 ```swift
-.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.8")
+.package(url: "https://github.com/ianegordon/swift-sdk.git", exact: "0.12.2-ianegordon.9")
 ```
 
 Two Swift Package Manager facts to know:
