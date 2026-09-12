@@ -43,6 +43,64 @@ struct StdioTransportTests {
         await transport.disconnect()
     }
 
+    @Test("Disconnect terminates a send parked on backpressure")
+    func testDisconnectTerminatesBackpressuredSend() async throws {
+        let (reader, output) = try FileDescriptor.pipe()
+        let (input, inputWrite) = try FileDescriptor.pipe()
+        defer {
+            try? reader.close()
+            try? output.close()
+            try? inputWrite.close()
+        }
+
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+
+        // Larger than the pipe buffer and never drained, so this write fills the
+        // pipe and parks in the EAGAIN retry loop.
+        let undrainable = Data(repeating: UInt8(ascii: "a"), count: 512 * 1024)
+        let send = Task { () -> (any Swift.Error)? in
+            do {
+                try await transport.send(undrainable)
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        // Give the write time to reach the retry loop, then tear the transport down.
+        try await Task.sleep(for: .milliseconds(100))
+        await transport.disconnect()
+
+        // Race the send against a deadline: without the re-check inside the retry
+        // loop the send never settles, and this fails instead of hanging the suite.
+        let settled: Bool = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = await send.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(3))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+
+        #expect(settled, "A send parked on backpressure must terminate when the transport disconnects")
+
+        // Best-effort cleanup: close the read end so a still-parked write fails
+        // rather than retrying indefinitely. Note this is not fully reliable — a
+        // send already parked in the retry loop cannot be reclaimed from here, so
+        // on regression this test reports a failed expectation but the run may
+        // still stall. Making it fail cleanly would need a seam in the retry loop
+        // (an injectable clock or retry hook) that the transport does not expose.
+        if !settled {
+            try? reader.close()
+        }
+    }
+
     @Test("Concurrent sends preserve message framing under backpressure")
     func testConcurrentSendsPreserveMessageFramingUnderBackpressure() async throws {
         let (reader, output) = try FileDescriptor.pipe()
