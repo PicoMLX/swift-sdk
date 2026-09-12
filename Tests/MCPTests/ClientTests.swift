@@ -144,6 +144,55 @@ struct ClientTests {
         await client.disconnect()
     }
 
+    @Test("A request cancelled before registration is never sent")
+    func testRequestCancelledBeforeRegistrationIsNotSent() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Answer initialize with the id the client actually generated.
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let last = await transport.sentMessages.last,
+                let data = last.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                try await transport.queue(
+                    response: Initialize.response(
+                        id: request.id,
+                        result: .init(
+                            protocolVersion: Version.latest,
+                            capabilities: .init(),
+                            serverInfo: .init(name: "TestServer", version: "1.0"),
+                            instructions: nil)))
+            }
+        }
+        _ = try await client.connect(transport: transport)
+        initTask.cancel()
+
+        let before = await wire(transport).count
+
+        // `send` queues an unstructured task to register the continuation, so
+        // cancelling from the same actor hop lands deterministically inside the
+        // pre-registration window — no race to lose. Cancelling from outside
+        // almost always loses it, which is why this goes through the client.
+        let context = try await client.sendPingThenCancelInSameHop()
+
+        await #expect(throws: CancellationError.self) { try await context.value }
+
+        // Give any send that slipped through a chance to appear.
+        try? await Task.sleep(for: .milliseconds(100))
+        let sent = Array(await wire(transport).dropFirst(before))
+        #expect(
+            !sent.contains { $0.contains("\"method\":\"ping\"") },
+            """
+            A request cancelled before its continuation registered must not reach \
+            the wire: the peer discards the cancellation as an unknown id and then \
+            runs a request whose caller was already told it was cancelled. Sent: \(sent)
+            """)
+
+        await client.disconnect()
+    }
+
     @Test("Message loop stops when the transport stream finishes")
     func testMessageLoopStopsWhenStreamFinishes() async throws {
         let transport = MockTransport()
@@ -918,5 +967,18 @@ struct ClientTests {
         // (If it did, the test would have crashed)
 
         await client.disconnect()
+    }
+}
+
+extension Client {
+    /// Sends a ping and cancels it without yielding the actor in between, so the
+    /// cancellation is recorded before `send`'s queued registration task runs.
+    /// Technique borrowed from the PR #275 review probes.
+    fileprivate func sendPingThenCancelInSameHop() async throws -> RequestContext<Ping.Result> {
+        let context = try send(Ping.request())
+        // cancelRequest records the cancellation synchronously before it awaits
+        // to notify, so the record lands ahead of the queued registration task.
+        try await cancelRequest(context.requestID, reason: "test")
+        return context
     }
 }
