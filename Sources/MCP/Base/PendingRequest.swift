@@ -11,6 +11,10 @@ struct PendingRequest<T> {
 
 /// A type-erased pending request.
 struct AnyPendingRequest: Sendable {
+    // Single client sends start queued. Existing server/batch callers retain
+    // their original issued-request behavior.
+    var isIssued: Bool
+    let method: String?
     private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
 
     init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
@@ -18,8 +22,11 @@ struct AnyPendingRequest: Sendable {
     }
 
     init<T: Sendable & Decodable>(
-        _ type: T.Type, resume: @escaping @Sendable (Result<T, Swift.Error>) -> Void
+        _ type: T.Type, method: String? = nil, isIssued: Bool = true,
+        resume: @escaping @Sendable (Result<T, Swift.Error>) -> Void
     ) {
+        self.method = method
+        self.isIssued = isIssued
         _resume = { result in
             switch result {
             case .success(let value):

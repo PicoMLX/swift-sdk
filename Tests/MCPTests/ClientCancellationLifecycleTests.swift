@@ -17,6 +17,7 @@ struct ClientCancellationLifecycleTests {
         await #expect(throws: CancellationError.self) { try await context.value }
         try await client.ping()
         #expect(await transport.resourceCount == 0)
+        #expect(await transport.cancellationCount == 0)
         await client.disconnect()
     }
 
@@ -31,6 +32,8 @@ struct ClientCancellationLifecycleTests {
         let other = try #require(await arrivals.next())
         request.cancel()
         await #expect(throws: CancellationError.self) { try await request.value }
+        var cancellations = transport.cancellations.makeAsyncIterator()
+        #expect(await cancellations.next() == pending.id)
         try await transport.reply(to: pending)
         try await transport.reply(to: other)
         #expect(try await independent.value.isEmpty)
@@ -49,6 +52,18 @@ struct ClientCancellationLifecycleTests {
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(await transport.resourceCount == 0)
         try await client.ping()
+        await client.disconnect()
+    }
+
+    @Test func cancellingInitializationDoesNotSendCancellationNotification() async throws {
+        let transport = CancellationTransport(delayInitialization: true)
+        let client = Client(name: "test", version: "1")
+        let connecting = Task { try await client.connect(transport: transport) }
+        var arrivals = transport.initializations.makeAsyncIterator()
+        _ = try #require(await arrivals.next())
+        connecting.cancel()
+        await #expect(throws: CancellationError.self) { try await connecting.value }
+        #expect(await transport.cancellationCount == 0)
         await client.disconnect()
     }
 
@@ -83,9 +98,22 @@ private actor CancellationTransport: Transport {
     nonisolated let resources: AsyncStream<Request<ReadResource>>
     private let resourceContinuation: AsyncStream<Request<ReadResource>>.Continuation
     private(set) var resourceCount = 0
+    private(set) var cancellationCount = 0
+    nonisolated let cancellations: AsyncStream<ID>
+    private let cancellationContinuation: AsyncStream<ID>.Continuation
+    nonisolated let initializations: AsyncStream<ID>
+    private let initializationContinuation: AsyncStream<ID>.Continuation
+    private let delayInitialization: Bool
     private var failSend = false
 
-    init() {
+    init(delayInitialization: Bool = false) {
+        self.delayInitialization = delayInitialization
+        let cancellation = AsyncStream<ID>.makeStream()
+        cancellations = cancellation.stream
+        cancellationContinuation = cancellation.continuation
+        let initialization = AsyncStream<ID>.makeStream()
+        initializations = initialization.stream
+        initializationContinuation = initialization.continuation
         let pair = AsyncStream<Request<ReadResource>>.makeStream()
         resources = pair.stream
         resourceContinuation = pair.continuation
@@ -94,6 +122,8 @@ private actor CancellationTransport: Transport {
     func disconnect() async {
         inbound.continuation.finish()
         resourceContinuation.finish()
+        initializationContinuation.finish()
+        cancellationContinuation.finish()
     }
     func receive() -> AsyncThrowingStream<Data, Error> { inbound.stream }
     func failResourceSend() { failSend = true }
@@ -102,6 +132,8 @@ private actor CancellationTransport: Transport {
         switch object?["method"] as? String {
         case Initialize.name:
             let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            initializationContinuation.yield(request.id)
+            if delayInitialization { return }
             inbound.continuation.yield(
                 try JSONEncoder().encode(
                     Initialize.response(
@@ -119,6 +151,10 @@ private actor CancellationTransport: Transport {
             resourceCount += 1
             resourceContinuation.yield(
                 try JSONDecoder().decode(Request<ReadResource>.self, from: data))
+        case CancelledNotification.name:
+            cancellationCount += 1
+            let message = try JSONDecoder().decode(Message<CancelledNotification>.self, from: data)
+            if let id = message.params.requestId { cancellationContinuation.yield(id) }
         default: break
         }
     }

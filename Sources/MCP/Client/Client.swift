@@ -400,7 +400,7 @@ public actor Client {
         // before the sending task gets its first turn on this actor.
         let (responses, continuation) = AsyncThrowingStream<M.Result, Error>.makeStream(
             bufferingPolicy: .bufferingNewest(1))
-        pendingRequests[request.id] = AnyPendingRequest(M.Result.self) { result in
+        pendingRequests[request.id] = AnyPendingRequest(M.Result.self, method: M.name, isIssued: false) { result in
             switch result {
             case .success(let value):
                 continuation.yield(value)
@@ -411,6 +411,7 @@ public actor Client {
         }
         Task {
             guard self.pendingRequests[request.id] != nil else { return }
+            self.pendingRequests[request.id]?.isIssued = true
             do {
                 try await connection.send(requestData)
             } catch {
@@ -445,9 +446,11 @@ public actor Client {
     public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
         // Remove the pending request and resume with cancellation error
         // This ensures any response that arrives after cancellation is ignored
-        if let pendingRequest = removePendingRequest(id: requestID) {
-            pendingRequest.resume(throwing: CancellationError())
-        }
+        guard let pendingRequest = removePendingRequest(id: requestID) else { return }
+        pendingRequest.resume(throwing: CancellationError())
+        // Do not send a cancellation for a request never issued, or for
+        // initialization (which MCP explicitly excludes from cancellation).
+        guard pendingRequest.isIssued, pendingRequest.method != Initialize.name else { return }
 
         // Send cancellation notification to server
         let notification = CancelledNotification.message(
