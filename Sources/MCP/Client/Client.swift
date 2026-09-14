@@ -475,6 +475,16 @@ public actor Client {
         }
     }
 
+    private func addPendingRequest<T: Sendable & Decodable>(
+        id: ID,
+        continuation: CheckedContinuation<T, Swift.Error>,
+        type: T.Type  // Keep type for AnyPendingRequest internal logic
+    ) {
+        pendingRequests[id] = AnyPendingRequest(
+            PendingRequest(continuation: continuation)
+        )
+    }
+
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
         return pendingRequests.removeValue(forKey: id)
     }
