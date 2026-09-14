@@ -396,27 +396,31 @@ public actor Client {
 
         let requestData = try encoder.encode(request)
 
-        let requestTask = Task<M.Result, Error> {
-            try await withCheckedThrowingContinuation { continuation in
-                Task {
-                    // Add the pending request before attempting to send
-                    self.addPendingRequest(
-                        id: request.id,
-                        continuation: continuation,
-                        type: M.Result.self
-                    )
-
-                    // Send the request data
-                    do {
-                        try await connection.send(requestData)
-                    } catch {
-                        // If send fails, try to remove the pending request.
-                        if self.removePendingRequest(id: request.id) != nil {
-                            continuation.resume(throwing: error)
-                        }
-                    }
-                }
+        // Register before returning the handle: cancellation must also work
+        // before the sending task gets its first turn on this actor.
+        let (responses, continuation) = AsyncThrowingStream<M.Result, Error>.makeStream(
+            bufferingPolicy: .bufferingNewest(1))
+        pendingRequests[request.id] = AnyPendingRequest(M.Result.self) { result in
+            switch result {
+            case .success(let value):
+                continuation.yield(value)
+                continuation.finish()
+            case .failure(let error):
+                continuation.finish(throwing: error)
             }
+        }
+        Task {
+            guard self.pendingRequests[request.id] != nil else { return }
+            do {
+                try await connection.send(requestData)
+            } catch {
+                self.removePendingRequest(id: request.id)?.resume(throwing: error)
+            }
+        }
+        let requestTask = Task<M.Result, Error> {
+            var iterator = responses.makeAsyncIterator()
+            guard let result = try await iterator.next() else { throw CancellationError() }
+            return result
         }
 
         return RequestContext(requestID: request.id, requestTask: requestTask)
@@ -454,24 +458,21 @@ public actor Client {
 
     /// Send a request and receive its response immediately.
     ///
-    /// Internal convenience method for cases where cancellation tracking is not needed.
+    /// Internal convenience method that forwards caller cancellation to the request.
     ///
     /// - Parameter request: The request to send
     /// - Returns: The result of the request
     /// - Throws: MCPError if the client is not connected
     func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        try Task.checkCancellation()
         let context = try send(request)
-        return try await context.value
-    }
-
-    private func addPendingRequest<T: Sendable & Decodable>(
-        id: ID,
-        continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type  // Keep type for AnyPendingRequest internal logic
-    ) {
-        pendingRequests[id] = AnyPendingRequest(
-            PendingRequest(continuation: continuation)
-        )
+        return try await withTaskCancellationHandler {
+            let result = try await context.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            Task { try? await self.cancelRequest(context.requestID) }
+        }
     }
 
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {

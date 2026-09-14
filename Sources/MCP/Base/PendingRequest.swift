@@ -14,21 +14,27 @@ struct AnyPendingRequest: Sendable {
     private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
 
     init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
+        self.init(T.self) { request.continuation.resume(with: $0) }
+    }
+
+    init<T: Sendable & Decodable>(
+        _ type: T.Type, resume: @escaping @Sendable (Result<T, Swift.Error>) -> Void
+    ) {
         _resume = { result in
             switch result {
             case .success(let value):
                 if let typedValue = value as? T {
-                    request.continuation.resume(returning: typedValue)
+                    resume(.success(typedValue))
                 } else if let value = value as? Value,
                     let data = try? JSONEncoder().encode(value),
                     let decoded = try? JSONDecoder().decode(T.self, from: data)
                 {
-                    request.continuation.resume(returning: decoded)
+                    resume(.success(decoded))
                 } else {
-                    request.continuation.resume(throwing: TypeMismatchError())
+                    resume(.failure(TypeMismatchError()))
                 }
             case .failure(let error):
-                request.continuation.resume(throwing: error)
+                resume(.failure(error))
             }
         }
     }
