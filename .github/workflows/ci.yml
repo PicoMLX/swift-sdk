@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-latest]
         swift-version:
           - 6.1.0
 
@@ -36,11 +36,13 @@ jobs:
         uses: vapor/swiftly-action@v0.2
         with:
           toolchain: ${{ matrix.swift-version }}
-      # Use the compiler shipped with the selected Apple SDK. A standalone
-      # Swift 6.1 compiler cannot import the current runner's newer SDK.
-      - name: Inspect Xcode Swift on macOS
-        if: matrix.os == 'macos-latest'
-        run: xcrun swift --version
+      # Xcode 16.4 pairs Swift 6.1 with its compatible Apple SDK.
+      - name: Select Xcode 16.4 on macOS
+        if: matrix.os == 'macos-15'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Inspect Swift
+        run: swift --version
 
       - name: Build
         run: swift build -v
@@ -50,7 +52,9 @@ jobs:
 
   conformance:
     timeout-minutes: 10
-    runs-on: macos-latest
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     name: MCP Conformance Tests
 
     steps:
@@ -97,7 +101,9 @@ jobs:
 
   documentation:
     name: Documentation
-    runs-on: macos-latest
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

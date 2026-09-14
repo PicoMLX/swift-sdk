@@ -205,8 +205,24 @@ public actor Client {
     /// Connect to the server using the given transport
     @discardableResult
     public func connect(transport: any Transport) async throws -> Initialize.Result {
+        try Task.checkCancellation()
+        guard connection == nil else {
+            throw MCPError.internalError("Client is already connected or connecting")
+        }
         self.connection = transport
-        try await self.connection?.connect()
+        do {
+            return try await establishConnection(transport: transport)
+        } catch {
+            // A failed/cancelled handshake owns no usable session. Clear it
+            // before allowing retry; never tear down a replacement connection.
+            if self.connection === transport { await disconnect() }
+            try Task.checkCancellation()
+            throw error
+        }
+    }
+
+    private func establishConnection(transport: any Transport) async throws -> Initialize.Result {
+        try await transport.connect()
 
         await logger?.debug(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
@@ -285,8 +301,6 @@ public actor Client {
 
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
-        await logger?.debug("Initiating client disconnect...")
-
         // Part 1: Inside actor - Grab state and clear internal references
         let taskToCancel = self.task
         let connectionToDisconnect = self.connection
@@ -294,6 +308,9 @@ public actor Client {
 
         self.task = nil
         self.connection = nil
+        self.serverCapabilities = nil
+        self.serverVersion = nil
+        self.instructions = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
@@ -470,9 +487,14 @@ public actor Client {
         try Task.checkCancellation()
         let context = try send(request)
         return try await withTaskCancellationHandler {
-            let result = try await context.value
-            try Task.checkCancellation()
-            return result
+            do {
+                let result = try await context.value
+                try Task.checkCancellation()
+                return result
+            } catch {
+                try Task.checkCancellation()
+                throw error
+            }
         } onCancel: {
             Task { try? await self.cancelRequest(context.requestID) }
         }

@@ -64,6 +64,30 @@ struct ClientCancellationLifecycleTests {
         connecting.cancel()
         await #expect(throws: CancellationError.self) { try await connecting.value }
         #expect(await transport.cancellationCount == 0)
+        #expect(await transport.disconnectCount == 1)
+        await #expect(throws: MCPError.self) { try await client.ping() }
+        let replacement = CancellationTransport()
+        try await client.connect(transport: replacement)
+        try await client.ping()
+        await client.disconnect()
+        #expect(await replacement.disconnectCount == 1)
+    }
+
+    @Test func cancellationTakesPrecedenceOverRacingSendFailure() async throws {
+        let transport = CancellationTransport()
+        let client = Client(name: "test", version: "1")
+        try await client.connect(transport: transport)
+        let reference = CancellationReference()
+        await transport.cancelWhenSendingResource { await reference.cancel() }
+        let gate = AsyncStream<Void>.makeStream()
+        let request = Task {
+            var start = gate.stream.makeAsyncIterator()
+            _ = await start.next()
+            return try await client.readResource(uri: "test://cancel-and-fail")
+        }
+        await reference.set(request)
+        gate.continuation.finish()
+        await #expect(throws: CancellationError.self) { try await request.value }
         await client.disconnect()
     }
 
@@ -97,6 +121,7 @@ private actor CancellationTransport: Transport {
     private let inbound = AsyncThrowingStream<Data, Error>.makeStream()
     nonisolated let resources: AsyncStream<Request<ReadResource>>
     private let resourceContinuation: AsyncStream<Request<ReadResource>>.Continuation
+    private(set) var disconnectCount = 0
     private(set) var resourceCount = 0
     private(set) var cancellationCount = 0
     nonisolated let cancellations: AsyncStream<ID>
@@ -105,6 +130,7 @@ private actor CancellationTransport: Transport {
     private let initializationContinuation: AsyncStream<ID>.Continuation
     private let delayInitialization: Bool
     private var failSend = false
+    private var cancelOnSend: (@Sendable () async -> Void)?
 
     init(delayInitialization: Bool = false) {
         self.delayInitialization = delayInitialization
@@ -120,12 +146,14 @@ private actor CancellationTransport: Transport {
     }
     func connect() async throws {}
     func disconnect() async {
+        disconnectCount += 1
         inbound.continuation.finish()
         resourceContinuation.finish()
         initializationContinuation.finish()
         cancellationContinuation.finish()
     }
     func receive() -> AsyncThrowingStream<Data, Error> { inbound.stream }
+    func cancelWhenSendingResource(_ action: @escaping @Sendable () async -> Void) { cancelOnSend = action }
     func failResourceSend() { failSend = true }
     func send(_ data: Data) async throws {
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -147,6 +175,10 @@ private actor CancellationTransport: Transport {
             inbound.continuation.yield(
                 try JSONEncoder().encode(Ping.response(id: request.id, result: Empty())))
         case ReadResource.name:
+            if let cancelOnSend {
+                await cancelOnSend()
+                throw MCPError.internalError("racing send failure")
+            }
             if failSend { throw MCPError.internalError("test send failure") }
             resourceCount += 1
             resourceContinuation.yield(
@@ -165,4 +197,10 @@ private actor CancellationTransport: Transport {
                     id: request.id,
                     result: .init(contents: []))))
     }
+}
+
+private actor CancellationReference {
+    private var request: Task<[Resource.Content], Error>?
+    func set(_ request: Task<[Resource.Content], Error>) { self.request = request }
+    func cancel() { request?.cancel() }
 }
