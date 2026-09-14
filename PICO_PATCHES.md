@@ -15,7 +15,7 @@ The extra client changes address failures reproduced against that exact tag:
 - Fence queued request work and handshakes across disconnect/reconnect generations.
 
 Local runtime: baseline587tests43suites pass; patched599tests44suites pass,
-including12 controlled lifecycle probes. Regressions cover pending cancellation,
+including12 lifecycle probes. Regressions cover pending cancellation,
 independent requests, late responses, cancelled entry, handshake cancellation,
 reconnect overlap, send errors, batches, and32completed/cancelled requests without
 retained markers. The tests observe private marker state from the Client actor;
@@ -38,8 +38,14 @@ filtering/automatic task cancellation remain outside this change. Handshake
 cleanup applies to the SDK Client's connection attempt; PicoCore still owns its
 coalesced connection tasks and must test waiter/sign-out ownership separately.
 
-No custom first-GET SSE delivery patch from the earlier official0.12.1-based
-Pico branch is included here. That is separate from this client lifecycle patch.
+A separate commit reuses the first-GET SSE delivery fix after reproducing it
+against this integration: the deterministic test fails three assertions before
+the fix (only a priming event arrives), and passes after. The conformance CI
+also timed out waiting for a sampling response (39/40 passed). Already-stored
+server messages are now delivered before the first GET priming cursor, using
+the existing event store. No new queue or scheduler state is introduced.
+The final transport change passes38focusedtests across transport/lifecycle suites;
+the599-test full run above preceded this additional regression test.
 
 The CI workflow targets this integration base and uses macos-15/Xcode16.4 for
 Swift6.1 with a compatible Apple SDK; Linux retains Swift6.1. Return to an
