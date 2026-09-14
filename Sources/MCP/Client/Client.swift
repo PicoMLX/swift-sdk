@@ -217,6 +217,10 @@ public actor Client {
     /// after and never resumed by anyone: the caller would hang forever on the
     /// very cancellation meant to free it.
     private var cancelledBeforeRegistration: Set<ID> = []
+    // Only issued requests can create an early-cancellation marker. Completed
+    // and unknown IDs must not accumulate state on a long-lived connection.
+    private var awaitingRegistration: Set<ID> = []
+    private var connectionGeneration: UInt64 = 0
     /// The id of the in-flight `initialize` request, if any.
     ///
     /// ``cancelRequest(_:reason:)`` takes an ``ID`` rather than a method, so the
@@ -248,19 +252,45 @@ public actor Client {
     /// Connect to the server using the given transport
     @discardableResult
     public func connect(transport: any Transport) async throws -> Initialize.Result {
+        try Task.checkCancellation()
+        guard connection == nil else {
+            throw MCPError.internalError("Client already connected or connecting")
+        }
+        let generation = connectionGeneration
         self.connection = transport
-        try await self.connection?.connect()
+        do {
+            let result = try await establishConnection(transport: transport, generation: generation)
+            try checkConnection(generation: generation)
+            return result
+        } catch {
+            if connectionGeneration == generation && self.connection === transport { await disconnect() }
+            try Task.checkCancellation()
+            throw error
+        }
+    }
+
+    private func checkConnection(generation: UInt64) throws {
+        try Task.checkCancellation()
+        guard connectionGeneration == generation && connection != nil else {
+            throw MCPError.internalError("Client disconnected")
+        }
+    }
+
+    private func establishConnection(transport: any Transport, generation: UInt64) async throws -> Initialize.Result {
+        try await transport.connect()
+        try checkConnection(generation: generation)
 
         await logger?.debug(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
 
+        try checkConnection(generation: generation)
         // Start message handling loop (matches Server.swift — no outer repeat)
         task = Task {
-            guard let connection = self.connection else { return }
+            let connection = transport
             do {
                 let stream = await connection.receive()
                 for try await data in stream {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled || self.connectionGeneration != generation { break }
 
                     if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
                         await handleBatchResponse(batchResponse)
@@ -312,13 +342,12 @@ public actor Client {
         }
 
         // Automatically initialize after connecting
-        return try await _initialize()
+        try checkConnection(generation: generation)
+        return try await _initialize(generation: generation)
     }
 
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
-        await logger?.debug("Initiating client disconnect...")
-
         // Part 1: Inside actor - Grab state and clear internal references
         let taskToCancel = self.task
         let connectionToDisconnect = self.connection
@@ -326,9 +355,14 @@ public actor Client {
 
         self.task = nil
         self.connection = nil
+        self.connectionGeneration &+= 1
         self.pendingRequests = [:]  // Use empty dictionary literal
         self.cancelledBeforeRegistration = []
+        self.awaitingRegistration = []
         self.initializeRequestID = nil
+        self.serverCapabilities = nil
+        self.serverVersion = nil
+        self.instructions = nil
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -424,12 +458,14 @@ public actor Client {
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func send<M: Method>(_ request: Request<M>) throws -> RequestContext<M.Result> {
+        try Task.checkCancellation()
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
         let requestData = try encoder.encode(request)
 
+        let generation = beginRequestRegistration(id: request.id)
         let requestTask = Task<M.Result, Error> {
             // Cancellation of the request task removes the pending request,
             // resumes its continuation with `CancellationError` and notifies
@@ -450,27 +486,34 @@ public actor Client {
                             self.addPendingRequest(
                                 id: request.id,
                                 continuation: continuation,
-                                type: M.Result.self
+                                type: M.Result.self,
+                                generation: generation
                             )
                         else { return }
 
-                        // Send the request data
                         do {
                             try await connection.send(requestData)
                         } catch {
+                            guard self.connectionGeneration == generation else { return }
                             // If send fails, try to remove the pending request.
                             if self.removePendingRequest(id: request.id) != nil {
                                 continuation.resume(throwing: error)
                             }
+                            return
                         }
                     }
                 }
             } onCancel: {
-                Task { try? await self.cancelRequest(request.id, reason: "Task cancelled") }
+                Task { try? await self.cancelRequest(request.id, reason: "Task cancelled", generation: generation) }
             }
         }
 
         return RequestContext(requestID: request.id, requestTask: requestTask)
+    }
+
+    private func cancelRequest(_ id: ID, reason: String?, generation: UInt64) async throws {
+        guard connectionGeneration == generation else { return }
+        try await cancelRequest(id, reason: reason)
     }
 
     /// Cancel a request by sending a CancelledNotification to the server.
@@ -490,7 +533,7 @@ public actor Client {
     /// - Throws: MCPError if the notification cannot be sent
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
-        cancelRequestLocally(requestID)
+        guard cancelRequestLocally(requestID) else { return }
 
         // "The `initialize` request MUST NOT be cancelled by clients"
         // (2025-11-25, basic/utilities/cancellation). The caller has been freed
@@ -499,7 +542,9 @@ public actor Client {
         // handler in `send(_:)` routes through here too.
         guard requestID != initializeRequestID else { return }
 
-        // Send cancellation notification to server
+        // Do not wait for send to return: HTTP transports may await the full
+        // response there. Notification delivery remains advisory and can race
+        // transmission because Transport exposes no dispatch acknowledgement.
         let notification = CancelledNotification.message(
             .init(requestId: requestID, reason: reason)
         )
@@ -511,16 +556,16 @@ public actor Client {
     /// Used where the spec forbids telling the peer: the `initialize` request
     /// **MUST NOT** be cancelled by clients, so a cancelled `connect()` must still
     /// release its caller without sending `notifications/cancelled` for it.
-    private func cancelRequestLocally(_ requestID: ID) {
+    private func cancelRequestLocally(_ requestID: ID) -> Bool {
         // Remove the pending request and resume with cancellation error
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
-        } else {
-            // Nothing registered yet: remember the cancellation so that the
-            // registration, when it happens, resumes immediately.
+            return true
+        } else if awaitingRegistration.contains(requestID) {
             cancelledBeforeRegistration.insert(requestID)
         }
+        return false
     }
 
     /// Send a request and receive its response immediately.
@@ -535,18 +580,28 @@ public actor Client {
         return try await context.value
     }
 
-    /// Registers a pending request, unless it was already cancelled.
-    ///
-    /// - Returns: `true` if the request is now pending and its caller should go
-    ///   on to send it; `false` if a cancellation arrived first, in which case
-    ///   the continuation has already been resumed and the request **must not**
-    ///   be put on the wire.
+    private func beginRequestRegistration(id: ID) -> UInt64 {
+        awaitingRegistration.insert(id)
+        return connectionGeneration
+    }
+
+    /// Registers an issued request on its original connection, or resumes its
+    /// continuation with cancellation/disconnection without transmitting it.
     @discardableResult
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type  // Keep type for AnyPendingRequest internal logic
+        type: T.Type,  // Keep type for AnyPendingRequest internal logic
+        generation: UInt64
     ) -> Bool {
+        guard connectionGeneration == generation else {
+            continuation.resume(throwing: MCPError.internalError("Client disconnected"))
+            return false
+        }
+        if awaitingRegistration.remove(id) == nil {
+            continuation.resume(throwing: MCPError.internalError("Client disconnected"))
+            return false
+        }
         // Cancelled while this registration was still on its way: resume now,
         // there is nobody else left to do it.
         if cancelledBeforeRegistration.remove(id) != nil {
@@ -584,6 +639,7 @@ public actor Client {
             M.Result, Swift.Error
         > {
             requests.append(try AnyRequest(request))
+            let generation = await client.beginRequestRegistration(id: request.id)
 
             // Return a Task that registers the pending request and awaits its result.
             // The continuation is resumed when the response arrives.
@@ -595,7 +651,8 @@ public actor Client {
                         await client.addPendingRequest(
                             id: request.id,
                             continuation: continuation,
-                            type: M.Result.self
+                            type: M.Result.self,
+                            generation: generation
                         )
                     }
                 }
@@ -721,11 +778,12 @@ public actor Client {
             "Initialization now happens automatically during connect. Use connect(transport:) instead."
     )
     public func initialize() async throws -> Initialize.Result {
-        return try await _initialize()
+        return try await _initialize(generation: connectionGeneration)
     }
 
     /// Internal initialization implementation
-    private func _initialize() async throws -> Initialize.Result {
+    private func _initialize(generation: UInt64) async throws -> Initialize.Result {
+        try checkConnection(generation: generation)
         let request = Initialize.request(
             .init(
                 protocolVersion: Version.latest,
@@ -735,6 +793,7 @@ public actor Client {
         initializeRequestID = request.id
 
         let result = try await sendAndAwait(request)
+        try checkConnection(generation: generation)
 
         self.serverCapabilities = result.capabilities
         self.serverVersion = result.protocolVersion
@@ -746,7 +805,9 @@ public actor Client {
             await httpTransport.updateNegotiatedProtocolVersion(result.protocolVersion)
         }
 
+        try checkConnection(generation: generation)
         try await notify(InitializedNotification.message())
+        try checkConnection(generation: generation)
 
         return result
     }
