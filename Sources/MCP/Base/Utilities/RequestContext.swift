@@ -28,7 +28,15 @@ public struct RequestContext<Output: Sendable & Decodable>: Sendable {
             // `Client.send`). Awaiting `.value` alone would never forward
             // cancellation to the unstructured request task.
             try await withTaskCancellationHandler {
-                try await requestTask.value
+                do {
+                    try Task.checkCancellation()
+                    let result = try await requestTask.value
+                    try Task.checkCancellation()
+                    return result
+                } catch {
+                    try Task.checkCancellation()
+                    throw error
+                }
             } onCancel: {
                 requestTask.cancel()
             }

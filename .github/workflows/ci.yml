@@ -4,7 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "codex/ian-integration-base"]
 
 permissions:
   contents: read
@@ -15,12 +15,12 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-latest]
         swift-version:
           - 6.1.0
 
     runs-on: ${{ matrix.os }}
-    name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
+    name: Test (${{ matrix.os }})
 
     steps:
       - uses: actions/checkout@v4
@@ -36,11 +36,13 @@ jobs:
         uses: vapor/swiftly-action@v0.2
         with:
           toolchain: ${{ matrix.swift-version }}
-      - name: Setup Swift on macOS
-        if: matrix.os == 'macos-latest'
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: ${{ matrix.swift-version }}
+      # Xcode 16.4 pairs Swift 6.1 with its compatible Apple SDK.
+      - name: Select Xcode 16.4 on macOS
+        if: matrix.os == 'macos-15'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Inspect Swift
+        run: swift --version
 
       - name: Build
         run: swift build -v
@@ -50,16 +52,16 @@ jobs:
 
   conformance:
     timeout-minutes: 10
-    runs-on: macos-latest
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     name: MCP Conformance Tests
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: 6.1.0
+      - name: Inspect Xcode Swift
+        run: xcrun swift --version
 
       - name: Build Swift executables
         run: |
@@ -99,13 +101,14 @@ jobs:
 
   documentation:
     name: Documentation
-    runs-on: macos-latest
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.1.0"
+      - name: Inspect Xcode Swift
+        run: xcrun swift --version
       - name: Build Documentation
         run: swift package generate-documentation --target MCP --warnings-as-errors
 

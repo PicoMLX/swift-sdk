@@ -343,6 +343,16 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
         standaloneSSEContinuation = sseContinuation
 
+        // A client may POST immediately after initialize, before its standalone
+        // GET reaches us. Deliver the already-stored server messages on this
+        // first stream. Replay before the new priming cursor so event order and
+        // Last-Event-ID remain consistent if the client reconnects mid-delivery.
+        for event in storedEvents where event.streamID == standaloneStreamID {
+            if let message = event.message {
+                sseContinuation.yield(SSEEvent.message(data: message, id: event.eventID).formatted())
+            }
+        }
+
         // Extract protocol version for priming event
         let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
 
