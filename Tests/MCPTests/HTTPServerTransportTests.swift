@@ -540,6 +540,28 @@ struct StatefulHTTPServerTransportTests {
         await transport.disconnect()
     }
 
+    @Test("First GET delivers server messages issued before it opened")
+    func firstGETDeliversEarlyMessages() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+        try await transport.send(makeNotificationBody(method: "notifications/early"))
+        try await transport.send(makeRequestBody(id: "server-early", method: "elicitation/create"))
+        let response = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected standalone stream")
+            await transport.disconnect()
+            return
+        }
+        // Finish after buffered events, so a regression reports missing output
+        // instead of hanging while waiting for a message that was lost.
+        await transport.disconnect()
+        var chunks: [String] = []
+        for try await chunk in stream { chunks.append(String(decoding: chunk, as: UTF8.self)) }
+        #expect(chunks.count == 3) // two early messages, then the priming cursor
+        #expect(chunks.first?.contains("early") == true)
+        #expect(chunks.dropFirst().first?.contains("server-early") == true)
+    }
+
     @Test("Second GET returns 409 Conflict")
     func testSecondGetReturns409() async throws {
         let transport = makeStatefulTransport()
